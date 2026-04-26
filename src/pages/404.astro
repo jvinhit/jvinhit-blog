@@ -1,6 +1,7 @@
 ---
 import BaseLayout from '~/layouts/BaseLayout.astro';
 import Container from '~/components/ui/Container.astro';
+import { withBase } from '~/lib/site-config';
 ---
 
 <BaseLayout
@@ -22,14 +23,14 @@ import Container from '~/components/ui/Container.astro';
       </p>
       <div class="mt-8 flex justify-center gap-3">
         <a
-          href="/"
+          href={withBase('/')}
           class="inline-flex items-center gap-2 rounded-xs border border-[var(--color-accent)] bg-[var(--color-accent)] px-4 py-2 text-xs font-semibold tracking-[0.12em] text-[var(--color-accent-fg)] uppercase hover:bg-[var(--color-accent-hover)]"
         >
           Return_home
           <span aria-hidden="true">{'>'}</span>
         </a>
         <a
-          href="/blog"
+          href={withBase('/blog')}
           class="inline-flex items-center gap-2 rounded-xs border border-[var(--color-border-strong)] px-4 py-2 text-xs font-semibold tracking-[0.12em] text-[var(--color-fg)] uppercase hover:text-[var(--color-accent)]"
         >
           Browse_archive

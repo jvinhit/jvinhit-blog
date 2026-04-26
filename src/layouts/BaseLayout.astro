@@ -2,7 +2,7 @@
 import '~/styles/global.css';
 import Header from '~/components/layout/Header.astro';
 import Footer from '~/components/layout/Footer.astro';
-import { SITE } from '~/lib/site-config';
+import { SITE, withBase } from '~/lib/site-config';
 
 interface Props {
   title?: string;
@@ -24,12 +24,14 @@ const {
 } = Astro.props;
 
 const pageTitle = title ? `${title} — ${SITE.name}` : SITE.name;
+// Astro.url.pathname đã chứa base path, nên khi ghép vào Astro.site
+// ta không prepend base thêm lần nữa để tránh double base.
 const canonicalURL = canonical
-  ? new URL(canonical, Astro.site).toString()
+  ? new URL(withBase(canonical), Astro.site).toString()
   : new URL(Astro.url.pathname, Astro.site).toString();
 const ogImageURL = ogImage
-  ? new URL(ogImage, Astro.site).toString()
-  : new URL('/og-default.png', Astro.site).toString();
+  ? new URL(withBase(ogImage), Astro.site).toString()
+  : new URL(withBase('/og-default.png'), Astro.site).toString();
 ---
 
 <!doctype html>
@@ -38,7 +40,7 @@ const ogImageURL = ogImage
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <meta name="generator" content={Astro.generator} />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/svg+xml" href={withBase('/favicon.svg')} />
     <link rel="canonical" href={canonicalURL} />
     {noindex && <meta name="robots" content="noindex, nofollow" />}
     <meta name="theme-color" content="#0a0a0a" />
@@ -66,7 +68,7 @@ const ogImageURL = ogImage
       rel="alternate"
       type="application/rss+xml"
       title={`${SITE.name} — RSS`}
-      href="/rss.xml"
+      href={withBase('/rss.xml')}
     />
 
     <slot name="head" />

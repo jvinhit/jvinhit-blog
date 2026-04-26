@@ -178,38 +178,57 @@ Cloudflare sẽ:
 
 Sau đó quay lại sửa `SITE.url` trong `src/lib/site-config.ts` → push → done.
 
-### (Optional) GH Pages thay cho CF Pages
+### Deploy lên GitHub Pages (đã setup sẵn)
 
-Vẫn khả thi nhưng chậm hơn & ít feature hơn. Nếu muốn, thêm file
-`.github/workflows/deploy-gh-pages.yml`:
+Repo đã có workflow `.github/workflows/deploy-gh-pages.yml` — chỉ cần enable
+Pages trong repo settings và push là xong.
 
-```yaml
-name: Deploy to GitHub Pages
-on:
-  push: { branches: [main] }
-permissions:
-  contents: read
-  pages: write
-  id-token: write
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 22, cache: npm }
-      - run: npm ci
-      - run: npm run build
-      - uses: actions/upload-pages-artifact@v3
-        with: { path: dist }
-      - id: deployment
-        uses: actions/deploy-pages@v4
+**Kiến trúc base path**
+
+Project site của GH Pages serve tại `https://<user>.github.io/<repo>/` nên
+mọi internal link cần prepend `/<repo>`. Ta xử lý tự động qua env var:
+
+| Env var     | Local / CF Pages  | GitHub Pages project      |
+| ----------- | ----------------- | ------------------------- |
+| `SITE_URL`  | _(unset → SITE.url)_ | `https://<user>.github.io` |
+| `BASE_PATH` | _(unset → `/`)_   | `/<repo>`                 |
+
+Workflow đã hard-code giá trị cho repo `jvinhit/jvinhit-blog`. **Nếu rename
+repo hoặc fork sang tên khác, đổi 2 env var trong
+`.github/workflows/deploy-gh-pages.yml` cho khớp.**
+
+**Các bước enable lần đầu**
+
+1. Push code lên `main` (workflow sẽ tự chạy lần đầu nhưng fail vì Pages
+   chưa bật — đó là bình thường).
+2. Vào GitHub repo → **Settings** → **Pages**.
+3. Ở mục **Build and deployment → Source**: chọn **GitHub Actions**.
+4. Chạy lại workflow: tab **Actions** → "Deploy to GitHub Pages" → **Run
+   workflow** (hoặc push thêm 1 commit bất kỳ lên `main`).
+5. Sau khi job xanh, URL production sẽ xuất hiện trong log job **deploy** và
+   ở mục **Settings → Pages → Your site is live at ...**.
+
+**Test base path locally**
+
+```bash
+SITE_URL=https://jvinhit.github.io BASE_PATH=/jvinhit-blog npm run build
+npx serve dist  # hoặc python3 -m http.server -d dist 8000
+# Mở http://localhost:3000/jvinhit-blog/ (KHÔNG phải /)
 ```
 
-Rồi Settings → Pages → Source = **GitHub Actions**.
+**Đổi sang custom domain sau này**
+
+1. Thêm file `public/CNAME` chứa domain (ví dụ `jvinhit.dev`).
+2. Trong `.github/workflows/deploy-gh-pages.yml`:
+   - Đổi `SITE_URL` → `https://jvinhit.dev`
+   - **Xóa dòng `BASE_PATH`** (hoặc set `BASE_PATH: /`).
+3. Update `SITE.url` trong `src/lib/site-config.ts` cho đồng bộ.
+4. DNS của domain trỏ về IP của GH Pages (xem docs GitHub).
+
+### (Alternative) Cloudflare Pages
+
+Xem section phía trên — recommended cho production vì analytics + faster
+rebuild. Config Cloudflare không cần `BASE_PATH` vì luôn serve tại root.
 
 ---
 

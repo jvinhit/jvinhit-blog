@@ -3,6 +3,7 @@ import { getCollection } from 'astro:content';
 import BaseLayout from '~/layouts/BaseLayout.astro';
 import Container from '~/components/ui/Container.astro';
 import PostMeta from '~/components/blog/PostMeta.astro';
+import { withBase } from '~/lib/site-config';
 
 const posts = await getCollection('posts', ({ data }) =>
   import.meta.env.PROD ? data.draft !== true : true
@@ -55,7 +56,7 @@ const years = Object.keys(grouped).sort((a, b) => Number(b) - Number(a));
               {grouped[year]!.map((post) => (
                 <li>
                   <a
-                    href={`/blog/${post.id}`}
+                    href={withBase(`/blog/${post.id}`)}
                     class="group grid grid-cols-1 items-baseline gap-2 px-3 py-4 transition-colors hover:bg-[var(--color-surface)] sm:grid-cols-[auto_1fr_auto]"
                   >
                     <PostMeta

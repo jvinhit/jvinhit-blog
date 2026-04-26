@@ -4,6 +4,7 @@ import BaseLayout from '~/layouts/BaseLayout.astro';
 import Container from '~/components/ui/Container.astro';
 import TerminalBox from '~/components/ui/TerminalBox.astro';
 import SkillBar from '~/components/about/SkillBar.astro';
+import { withBase } from '~/lib/site-config';
 import '~/styles/prose.css';
 
 const entry = await getEntry('about', 'about');
@@ -34,7 +35,7 @@ const { title, role, intent, skills, experience, education, connections } =
       </p>
       <div class="mt-6">
         <a
-          href={`/resume.pdf`}
+          href={withBase('/resume.pdf')}
           class="inline-flex items-center gap-2 rounded-xs border border-[var(--color-accent)] bg-[var(--color-accent)] px-4 py-2 text-xs font-semibold tracking-[0.12em] text-[var(--color-accent-fg)] uppercase transition-colors hover:bg-[var(--color-accent-hover)]"
         >
           Download_Resume.pdf
@@ -55,7 +56,7 @@ const { title, role, intent, skills, experience, education, connections } =
                   </span>
                   {c.href ? (
                     <a
-                      href={c.href}
+                      href={withBase(c.href)}
                       class="text-right text-[var(--color-accent)] hover:text-[var(--color-accent-hover)]"
                     >
                       {c.value}

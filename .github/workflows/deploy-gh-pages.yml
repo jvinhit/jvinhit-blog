@@ -1,0 +1,70 @@
+name: Deploy to GitHub Pages
+
+on:
+  # Trigger deploy khi có push lên main (sau khi CI workflow đã pass type-check).
+  # Ta không chain `workflow_run` để giữ flow đơn giản — GH Pages job sẽ
+  # tự fail nếu type-check hoặc build có vấn đề.
+  push:
+    branches: [main]
+  # Cho phép redeploy thủ công từ UI Actions.
+  workflow_dispatch:
+
+# GH Pages yêu cầu 3 permissions này để upload artifact + deploy OIDC token.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Queue deploy tuần tự, KHÔNG cancel job đang chạy để tránh nửa deploy lỗi.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build static site
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build
+        env:
+          # Project site URL structure: https://<user>.github.io/<repo>/
+          # Đổi 2 biến này nếu:
+          #   - Rename repo: update BASE_PATH
+          #   - Dùng custom domain (CNAME): xoá BASE_PATH, đổi SITE_URL
+          SITE_URL: https://jvinhit.github.io
+          BASE_PATH: /jvinhit-blog
+        run: npm run build
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./dist
+
+  deploy:
+    name: Deploy to Pages
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

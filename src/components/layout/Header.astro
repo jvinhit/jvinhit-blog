@@ -1,5 +1,5 @@
 ---
-import { SITE } from '~/lib/site-config';
+import { SITE, withBase } from '~/lib/site-config';
 
 interface Props {
   /** Path hiện tại để highlight mục nav đang active */
@@ -8,9 +8,12 @@ interface Props {
 
 const { pathname } = Astro.props;
 
+// So sánh active state với path đã được base-prefixed để khớp với
+// `Astro.url.pathname` (đã chứa base).
 const isActive = (href: string): boolean => {
-  if (href === '/') return pathname === '/';
-  return pathname === href || pathname.startsWith(`${href}/`);
+  const full = withBase(href);
+  if (href === '/') return pathname === full || pathname === `${full}/`;
+  return pathname === full || pathname.startsWith(`${full}/`);
 };
 ---
 
@@ -19,7 +22,7 @@ const isActive = (href: string): boolean => {
     class="mx-auto flex h-14 max-w-[1184px] items-center justify-between px-6 sm:px-10"
   >
     <a
-      href="/"
+      href={withBase('/')}
       class="text-sm font-semibold tracking-wider uppercase hover:text-[var(--color-accent)]"
       aria-label={`${SITE.name} home`}
     >
@@ -30,7 +33,7 @@ const isActive = (href: string): boolean => {
       {
         SITE.nav.map((item) => (
           <a
-            href={item.href}
+            href={withBase(item.href)}
             class:list={[
               'px-3 py-1.5 text-xs tracking-[0.12em] uppercase transition-colors',
               isActive(item.href)

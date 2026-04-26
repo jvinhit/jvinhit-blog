@@ -6,8 +6,22 @@ import tailwindcss from '@tailwindcss/vite';
 
 import { SITE } from './src/lib/site-config';
 
+/**
+ * Deploy target được quyết bởi env var (set trong CI workflow):
+ * - Không set       → local dev / Cloudflare Pages / custom domain (base `/`)
+ * - SITE_URL/BASE   → GitHub Pages project site, cần base path
+ *
+ * Ví dụ `.github/workflows/deploy-gh-pages.yml`:
+ *   env:
+ *     SITE_URL: https://jvinhit.github.io
+ *     BASE_PATH: /jvinhit-blog
+ */
+const SITE_URL = process.env.SITE_URL ?? SITE.url;
+const BASE_PATH = process.env.BASE_PATH ?? '/';
+
 export default defineConfig({
-  site: SITE.url,
+  site: SITE_URL,
+  base: BASE_PATH,
   trailingSlash: 'never',
 
   integrations: [

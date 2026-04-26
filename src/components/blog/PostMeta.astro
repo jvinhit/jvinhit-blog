@@ -1,5 +1,6 @@
 ---
 import { formatDateISO } from '~/lib/format';
+import { withBase } from '~/lib/site-config';
 
 interface Props {
   pubDate: Date;
@@ -38,7 +39,7 @@ const visibleTags = tags.slice(0, 3);
   {
     visibleTags.map((tag) => (
       <a
-        href={`/tags/${tag}`}
+        href={withBase(`/tags/${tag}`)}
         class="tracking-wider uppercase hover:text-[var(--color-accent)]"
       >
         {tag}

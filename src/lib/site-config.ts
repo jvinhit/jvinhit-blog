@@ -38,3 +38,22 @@ export const SITE = {
 } as const;
 
 export type SiteConfig = typeof SITE;
+
+/**
+ * Prepend Astro's configured `base` path to an internal URL.
+ *
+ * Dùng CHO MỌI internal link (href, src, redirect) để site portable giữa
+ * các deploy target khác nhau:
+ * - Local dev / Cloudflare Pages / custom domain  → base = `/`  → return path as-is
+ * - GitHub Pages project site (jvinhit.github.io/jvinhit-blog) → base = `/jvinhit-blog/`
+ *   → tự prepend prefix vào mọi link
+ *
+ * External URLs (http/https/mailto/tel) được return nguyên vẹn.
+ */
+export function withBase(path: string): string {
+  if (/^(https?:|mailto:|tel:|#|data:)/i.test(path)) return path;
+  const base = import.meta.env.BASE_URL;
+  const normalizedBase = base.endsWith('/') ? base.slice(0, -1) : base;
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  return `${normalizedBase}${normalizedPath}`;
+}

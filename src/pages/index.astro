@@ -3,7 +3,7 @@ import { getCollection, render } from 'astro:content';
 import BaseLayout from '~/layouts/BaseLayout.astro';
 import Container from '~/components/ui/Container.astro';
 import ArticleCard from '~/components/blog/ArticleCard.astro';
-import { SITE } from '~/lib/site-config';
+import { SITE, withBase } from '~/lib/site-config';
 import { estimateReadingMinutes } from '~/lib/format';
 
 const HOMEPAGE_LIMIT = 5;
@@ -53,14 +53,14 @@ const totalPosts = sortedPosts.length;
 
       <div class="mt-8 flex flex-wrap items-center gap-3">
         <a
-          href="/blog"
+          href={withBase('/blog')}
           class="inline-flex items-center gap-2 rounded-xs border border-[var(--color-border-strong)] bg-transparent px-4 py-2 text-xs font-semibold tracking-[0.12em] text-[var(--color-fg)] uppercase transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
         >
           Run_journal
           <span aria-hidden="true">{'>'}</span>
         </a>
         <a
-          href="/about"
+          href={withBase('/about')}
           class="inline-flex items-center gap-2 rounded-xs border border-transparent px-4 py-2 text-xs font-semibold tracking-[0.12em] text-[var(--color-fg-muted)] uppercase transition-colors hover:text-[var(--color-accent)]"
         >
           View_resume
@@ -102,7 +102,7 @@ const totalPosts = sortedPosts.length;
         totalPosts > HOMEPAGE_LIMIT && (
           <div class="mt-8 flex justify-center">
             <a
-              href="/blog"
+              href={withBase('/blog')}
               class="inline-flex items-center gap-2 rounded-xs border border-[var(--color-border-strong)] px-5 py-2.5 text-xs font-semibold tracking-[0.12em] text-[var(--color-fg)] uppercase transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
             >
               Load_more_records

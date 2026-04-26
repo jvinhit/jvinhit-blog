@@ -3,6 +3,7 @@ import type { CollectionEntry } from 'astro:content';
 import BaseLayout from './BaseLayout.astro';
 import Container from '~/components/ui/Container.astro';
 import { formatDateLong } from '~/lib/format';
+import { withBase } from '~/lib/site-config';
 import '~/styles/prose.css';
 
 interface Props {
@@ -21,10 +22,17 @@ const { title, description, pubDate, updatedDate, tags } = post.data;
         <ol
           class="flex items-center gap-2 text-xs text-[var(--color-fg-muted)]"
         >
-          <li><a href="/" class="hover:text-[var(--color-accent)]">HOME</a></li>
+          <li>
+            <a href={withBase('/')} class="hover:text-[var(--color-accent)]"
+              >HOME</a
+            >
+          </li>
           <li aria-hidden="true">/</li>
           <li>
-            <a href="/blog" class="hover:text-[var(--color-accent)]">JOURNAL</a>
+            <a
+              href={withBase('/blog')}
+              class="hover:text-[var(--color-accent)]">JOURNAL</a
+            >
           </li>
           <li aria-hidden="true">/</li>
           <li class="text-[var(--color-fg)] uppercase">{post.id}</li>
@@ -57,7 +65,7 @@ const { title, description, pubDate, updatedDate, tags } = post.data;
                   {tags.map((t) => (
                     <li>
                       <a
-                        href={`/tags/${t}`}
+                        href={withBase(`/tags/${t}`)}
                         class="tracking-wider uppercase hover:text-[var(--color-accent)]"
                       >
                         #{t}
@@ -86,7 +94,7 @@ const { title, description, pubDate, updatedDate, tags } = post.data;
         class="mt-12 border-t border-dashed border-[var(--color-border-strong)] pt-6"
       >
         <a
-          href="/blog"
+          href={withBase('/blog')}
           class="inline-flex items-center gap-2 text-xs font-semibold tracking-[0.12em] text-[var(--color-accent)] uppercase hover:text-[var(--color-accent-hover)]"
         >
           <span aria-hidden="true">{'<'}</span>
