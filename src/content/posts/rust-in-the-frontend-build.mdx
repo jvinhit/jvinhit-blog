@@ -1,0 +1,47 @@
+---
+title: 'Rust in the Frontend Build Step'
+description: How SWC and Turbopack are fundamentally changing frontend tooling performance — a lap around the toolchain as of late 2024.
+pubDate: 2024-09-03
+tags: [tooling, rust, build]
+draft: false
+---
+
+Build tools used to be the one thing we did not question. Webpack was slow,
+but it was _our_ slow. Then the Rust rewrites started landing and the
+numbers got hard to ignore.
+
+## A quick lap around the toolchain
+
+| Tool      | Language | Role                 |
+| --------- | -------- | -------------------- |
+| SWC       | Rust     | Parser / transformer |
+| esbuild   | Go       | Bundler              |
+| Turbopack | Rust     | Bundler (Next.js)    |
+| Biome     | Rust     | Linter / formatter   |
+| Oxlint    | Rust     | Linter               |
+
+Two numbers from our monorepo:
+
+- **Babel → SWC** cut CI type-check pipeline by **41%**.
+- **ESLint → Oxlint** cut the pre-commit hook from `4.2s` → `0.09s`.
+
+## It is not just speed
+
+Faster tools change behavior:
+
+> When `pnpm lint` finishes in 90ms, engineers run it _on every save_.
+
+The feedback loop tightens. Bugs die earlier. The real win is cultural, not
+numerical.
+
+## Where to start
+
+If you are stuck on Babel + ESLint + Webpack, pick one swap per sprint:
+
+```bash
+# step 1 — drop in SWC where Babel was
+pnpm remove @babel/core @babel/preset-env
+pnpm add -D @swc/core @swc/cli
+```
+
+Do not refactor everything in a week. You will regret it.

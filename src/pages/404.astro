@@ -1,0 +1,41 @@
+---
+import BaseLayout from '~/layouts/BaseLayout.astro';
+import Container from '~/components/ui/Container.astro';
+---
+
+<BaseLayout
+  title="404 — Not Found"
+  description="The path you requested does not exist on this system."
+  noindex
+>
+  <Container class="py-24">
+    <div class="mx-auto max-w-lg text-center">
+      <p class="terminal-label">System/Exception</p>
+      <h1
+        class="mt-6 text-6xl font-semibold tracking-tight text-[var(--color-accent)] sm:text-8xl"
+      >
+        404
+      </h1>
+      <p class="mt-4 text-[var(--color-fg-muted)]">
+        <code class="text-[var(--color-fg)]">ENOENT</code> — the path you requested
+        does not exist on this system.
+      </p>
+      <div class="mt-8 flex justify-center gap-3">
+        <a
+          href="/"
+          class="inline-flex items-center gap-2 rounded-xs border border-[var(--color-accent)] bg-[var(--color-accent)] px-4 py-2 text-xs font-semibold tracking-[0.12em] text-[var(--color-accent-fg)] uppercase hover:bg-[var(--color-accent-hover)]"
+        >
+          Return_home
+          <span aria-hidden="true">{'>'}</span>
+        </a>
+        <a
+          href="/blog"
+          class="inline-flex items-center gap-2 rounded-xs border border-[var(--color-border-strong)] px-4 py-2 text-xs font-semibold tracking-[0.12em] text-[var(--color-fg)] uppercase hover:text-[var(--color-accent)]"
+        >
+          Browse_archive
+          <span aria-hidden="true">{'>'}</span>
+        </a>
+      </div>
+    </div>
+  </Container>
+</BaseLayout>

@@ -1,0 +1,165 @@
+/**
+ * Typography cho nội dung MDX render ra — scoped vào `.prose-terminal`.
+ * Không dùng @tailwindcss/typography để giữ quyền kiểm soát token + bundle nhẹ.
+ */
+
+.prose-terminal {
+  color: var(--color-fg);
+  line-height: 1.7;
+  font-size: 0.975rem;
+}
+
+.prose-terminal > * + * {
+  margin-top: 1.1em;
+}
+
+.prose-terminal h2,
+.prose-terminal h3,
+.prose-terminal h4 {
+  color: var(--color-fg);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+  scroll-margin-top: 5rem;
+}
+
+.prose-terminal h2 {
+  font-size: 1.6rem;
+  margin-top: 2.2em;
+  margin-bottom: 0.6em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px dashed var(--color-border-strong);
+}
+
+.prose-terminal h2::before {
+  content: '// ';
+  color: var(--color-accent);
+}
+
+.prose-terminal h3 {
+  font-size: 1.25rem;
+  margin-top: 1.8em;
+  margin-bottom: 0.4em;
+}
+
+.prose-terminal p {
+  color: var(--color-fg);
+}
+
+.prose-terminal a {
+  color: var(--color-accent);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+.prose-terminal a:hover {
+  color: var(--color-accent-hover);
+}
+
+.prose-terminal strong {
+  color: var(--color-fg);
+  font-weight: 600;
+}
+
+.prose-terminal em {
+  color: var(--color-fg-muted);
+  font-style: italic;
+}
+
+/* Inline code */
+.prose-terminal :not(pre) > code {
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  padding: 0.15em 0.4em;
+  border-radius: var(--radius-xs);
+  font-size: 0.85em;
+  color: var(--color-accent);
+}
+
+/* Block code (Shiki wraps trong `pre.astro-code`) */
+.prose-terminal pre {
+  background: var(--color-surface-2) !important;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 1.1em 1.3em;
+  overflow-x: auto;
+  font-size: 0.85em;
+  line-height: 1.6;
+}
+
+.prose-terminal pre code {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  font-size: inherit;
+}
+
+/* Blockquote */
+.prose-terminal blockquote {
+  border-left: 2px solid var(--color-accent);
+  padding: 0.25em 1em;
+  color: var(--color-fg-muted);
+  background: var(--color-surface);
+  margin-left: 0;
+  margin-right: 0;
+}
+
+/* Lists */
+.prose-terminal ul,
+.prose-terminal ol {
+  padding-left: 1.5em;
+}
+.prose-terminal ul {
+  list-style: none;
+}
+.prose-terminal ul > li {
+  position: relative;
+}
+.prose-terminal ul > li::before {
+  content: '>';
+  color: var(--color-accent);
+  position: absolute;
+  left: -1.25em;
+}
+.prose-terminal ol {
+  list-style: decimal;
+}
+.prose-terminal li + li {
+  margin-top: 0.3em;
+}
+
+/* HR */
+.prose-terminal hr {
+  border: 0;
+  border-top: 1px dashed var(--color-border-strong);
+  margin: 2.5em 0;
+}
+
+/* Images */
+.prose-terminal img {
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  width: 100%;
+  height: auto;
+}
+
+/* Tables */
+.prose-terminal table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9em;
+}
+.prose-terminal th,
+.prose-terminal td {
+  text-align: left;
+  padding: 0.5em 0.75em;
+  border-bottom: 1px solid var(--color-border);
+}
+.prose-terminal th {
+  color: var(--color-fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.8em;
+  font-weight: 600;
+}

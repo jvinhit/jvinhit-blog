@@ -1,0 +1,69 @@
+---
+import { getCollection } from 'astro:content';
+import BaseLayout from '~/layouts/BaseLayout.astro';
+import Container from '~/components/ui/Container.astro';
+import ArticleCard from '~/components/blog/ArticleCard.astro';
+import { estimateReadingMinutes } from '~/lib/format';
+import type { GetStaticPaths } from 'astro';
+
+export const getStaticPaths = (async () => {
+  const posts = await getCollection('posts', ({ data }) =>
+    import.meta.env.PROD ? data.draft !== true : true
+  );
+
+  const tagMap = new Map<string, typeof posts>();
+  for (const post of posts) {
+    for (const tag of post.data.tags) {
+      if (!tagMap.has(tag)) tagMap.set(tag, []);
+      tagMap.get(tag)!.push(post);
+    }
+  }
+
+  return Array.from(tagMap.entries()).map(([tag, tagPosts]) => ({
+    params: { tag },
+    props: { tag, posts: tagPosts },
+  }));
+}) satisfies GetStaticPaths;
+
+type Props = {
+  tag: string;
+  posts: Awaited<ReturnType<typeof getCollection<'posts'>>>;
+};
+
+const { tag, posts } = Astro.props as Props;
+
+const sorted = [...posts].sort(
+  (a, b) => b.data.pubDate.getTime() - a.data.pubDate.getTime()
+);
+
+const withMeta = sorted.map((post) => ({
+  post,
+  readingMinutes: estimateReadingMinutes(post.body ?? ''),
+}));
+---
+
+<BaseLayout title={`#${tag}`} description={`All entries tagged with #${tag}.`}>
+  <Container class="pt-12 pb-16">
+    <header
+      class="border-b border-dashed border-[var(--color-border-strong)] pb-6"
+    >
+      <p class="terminal-label">Filter/Tag</p>
+      <h1 class="mt-3 text-3xl font-semibold sm:text-5xl">
+        <span class="text-[var(--color-accent)]">#</span>{tag}
+      </h1>
+      <p class="mt-3 text-[var(--color-fg-muted)]">
+        {sorted.length} entries
+      </p>
+    </header>
+
+    <ul class="mt-6">
+      {
+        withMeta.map(({ post, readingMinutes }) => (
+          <li>
+            <ArticleCard post={post} readingMinutes={readingMinutes} />
+          </li>
+        ))
+      }
+    </ul>
+  </Container>
+</BaseLayout>

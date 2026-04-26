@@ -1,0 +1,116 @@
+---
+import { getCollection, render } from 'astro:content';
+import BaseLayout from '~/layouts/BaseLayout.astro';
+import Container from '~/components/ui/Container.astro';
+import ArticleCard from '~/components/blog/ArticleCard.astro';
+import { SITE } from '~/lib/site-config';
+import { estimateReadingMinutes } from '~/lib/format';
+
+const HOMEPAGE_LIMIT = 5;
+
+const allPosts = await getCollection('posts', ({ data }) =>
+  import.meta.env.PROD ? data.draft !== true : true
+);
+
+// Sort newest first
+const sortedPosts = [...allPosts].sort(
+  (a, b) => b.data.pubDate.getTime() - a.data.pubDate.getTime()
+);
+
+// Tính reading time ở build time — nhận plain text từ `render()`
+const postsWithMeta = await Promise.all(
+  sortedPosts.slice(0, HOMEPAGE_LIMIT).map(async (post) => {
+    const { remarkPluginFrontmatter } = await render(post);
+    const readingMinutes =
+      (remarkPluginFrontmatter?.readingMinutes as number | undefined) ??
+      estimateReadingMinutes(post.body ?? '');
+    return { post, readingMinutes };
+  })
+);
+
+const totalPosts = sortedPosts.length;
+---
+
+<BaseLayout>
+  <Container class="pt-12 pb-16 sm:pt-16">
+    {/* Hero */}
+    <section class="border-b border-[var(--color-border)] pb-10">
+      <p class="terminal-label">System/Initialized</p>
+
+      <h1
+        class="mt-6 text-4xl leading-[1.1] font-semibold tracking-tight sm:text-6xl md:text-7xl"
+      >
+        Hi, I'm <span class="text-[var(--color-accent)]"
+          >{SITE.author.name}</span
+        >
+      </h1>
+
+      <p
+        class="mt-6 max-w-[640px] text-base leading-relaxed text-[var(--color-fg-muted)] sm:text-lg"
+      >
+        {SITE.description}
+      </p>
+
+      <div class="mt-8 flex flex-wrap items-center gap-3">
+        <a
+          href="/blog"
+          class="inline-flex items-center gap-2 rounded-xs border border-[var(--color-border-strong)] bg-transparent px-4 py-2 text-xs font-semibold tracking-[0.12em] text-[var(--color-fg)] uppercase transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+        >
+          Run_journal
+          <span aria-hidden="true">{'>'}</span>
+        </a>
+        <a
+          href="/about"
+          class="inline-flex items-center gap-2 rounded-xs border border-transparent px-4 py-2 text-xs font-semibold tracking-[0.12em] text-[var(--color-fg-muted)] uppercase transition-colors hover:text-[var(--color-accent)]"
+        >
+          View_resume
+          <span aria-hidden="true">{'>'}</span>
+        </a>
+      </div>
+    </section>
+
+    {/* Latest entries */}
+    <section class="mt-10">
+      <header class="flex items-baseline justify-between">
+        <h2 class="text-2xl font-semibold tracking-tight sm:text-3xl">
+          <span class="text-[var(--color-accent)]">//</span> Latest_Logs
+        </h2>
+        <span class="text-xs text-[var(--color-fg-muted)]">
+          {totalPosts.toString().padStart(3, '0')} entries
+        </span>
+      </header>
+
+      {
+        postsWithMeta.length === 0 ? (
+          <p class="mt-8 text-sm text-[var(--color-fg-muted)]">
+            Chưa có bài viết nào. Thêm file MDX vào{' '}
+            <code class="text-[var(--color-accent)]">src/content/posts/</code>{' '}
+            để bắt đầu.
+          </p>
+        ) : (
+          <ul class="mt-6">
+            {postsWithMeta.map(({ post, readingMinutes }) => (
+              <li>
+                <ArticleCard post={post} readingMinutes={readingMinutes} />
+              </li>
+            ))}
+          </ul>
+        )
+      }
+
+      {
+        totalPosts > HOMEPAGE_LIMIT && (
+          <div class="mt-8 flex justify-center">
+            <a
+              href="/blog"
+              class="inline-flex items-center gap-2 rounded-xs border border-[var(--color-border-strong)] px-5 py-2.5 text-xs font-semibold tracking-[0.12em] text-[var(--color-fg)] uppercase transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+            >
+              Load_more_records
+              <span aria-hidden="true">{'>'}</span>
+            </a>
+          </div>
+        )
+      }
+    </section>
+  </Container>
+</BaseLayout>

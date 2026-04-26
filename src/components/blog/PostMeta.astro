@@ -1,0 +1,66 @@
+---
+import { formatDateISO } from '~/lib/format';
+
+interface Props {
+  pubDate: Date;
+  /** Danh sách tag — chỉ render tối đa 3 để giữ layout compact */
+  tags?: readonly string[];
+  /** Thời gian đọc ước tính (phút) */
+  readingMinutes?: number;
+  /** Hiển thị chevron `>` cuối line như design */
+  showArrow?: boolean;
+  class?: string;
+}
+
+const {
+  pubDate,
+  tags = [],
+  readingMinutes,
+  showArrow = true,
+  class: className = '',
+} = Astro.props;
+
+const visibleTags = tags.slice(0, 3);
+---
+
+<div
+  class:list={[
+    'flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--color-fg-muted)]',
+    className,
+  ]}
+>
+  <time datetime={pubDate.toISOString()} class="tabular-nums">
+    {formatDateISO(pubDate)}
+  </time>
+
+  {visibleTags.length > 0 && <span aria-hidden="true">//</span>}
+
+  {
+    visibleTags.map((tag) => (
+      <a
+        href={`/tags/${tag}`}
+        class="tracking-wider uppercase hover:text-[var(--color-accent)]"
+      >
+        {tag}
+      </a>
+    ))
+  }
+
+  {
+    readingMinutes !== undefined && (
+      <>
+        <span aria-hidden="true" class="ml-auto">
+          {readingMinutes} MIN READ
+        </span>
+      </>
+    )
+  }
+
+  {
+    showArrow && (
+      <span aria-hidden="true" class="ml-auto text-[var(--color-fg-subtle)]">
+        {'>'}
+      </span>
+    )
+  }
+</div>

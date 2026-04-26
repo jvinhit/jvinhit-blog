@@ -1,0 +1,48 @@
+---
+title: 'Deconstructing the Virtual DOM'
+description: Why fine-grained reactivity will eventually replace diffing algorithms in modern frameworks — and what that means for the libraries you ship today.
+pubDate: 2024-10-22
+tags: [react, reactivity, performance]
+draft: false
+---
+
+For a decade the Virtual DOM was the default answer. Diff, reconcile, commit.
+It worked. But the cost of "re-running the world to find what changed" is a
+tax we keep paying — frame after frame.
+
+## The cost you do not see
+
+A typical React component re-render does three things before a single byte
+touches the actual DOM:
+
+1. Allocate a new virtual tree.
+2. Walk it, comparing with the previous tree.
+3. Produce a patch list.
+
+Frameworks like **Solid** and **Svelte 5** skip steps 1 and 2 by tracking
+dependencies at the variable level.
+
+```ts
+// Solid — no virtual DOM, no diff
+const [count, setCount] = createSignal(0);
+
+// Only this text node updates when `count` changes.
+return <p>count is {count()}</p>;
+```
+
+## Does it matter in practice?
+
+For small apps — no. For lists of 10k rows with 50 interactive fields each —
+yes, and dramatically. I ran [js-framework-benchmark][bench] on a live product
+screen and saw a **3.1×** reduction in scripting time swapping React for Solid
+(no other changes).
+
+[bench]: https://krausest.github.io/js-framework-benchmark/
+
+## What to do tomorrow
+
+You do not need to rewrite your app. But:
+
+- **Measure.** `performance.measure` is free and honest.
+- **Memoize the right thing.** `useMemo` is not a microscope; it is a scalpel.
+- **Keep an eye** on the signal-based wave. It is not hype anymore.

@@ -1,0 +1,55 @@
+---
+import { SITE } from '~/lib/site-config';
+
+interface Props {
+  /** Path hiện tại để highlight mục nav đang active */
+  pathname: string;
+}
+
+const { pathname } = Astro.props;
+
+const isActive = (href: string): boolean => {
+  if (href === '/') return pathname === '/';
+  return pathname === href || pathname.startsWith(`${href}/`);
+};
+---
+
+<header class="border-b border-[var(--color-border)]">
+  <div
+    class="mx-auto flex h-14 max-w-[1184px] items-center justify-between px-6 sm:px-10"
+  >
+    <a
+      href="/"
+      class="text-sm font-semibold tracking-wider uppercase hover:text-[var(--color-accent)]"
+      aria-label={`${SITE.name} home`}
+    >
+      {SITE.handle}
+    </a>
+
+    <nav class="hidden items-center gap-1 md:flex" aria-label="Primary">
+      {
+        SITE.nav.map((item) => (
+          <a
+            href={item.href}
+            class:list={[
+              'px-3 py-1.5 text-xs tracking-[0.12em] uppercase transition-colors',
+              isActive(item.href)
+                ? 'text-[var(--color-accent)]'
+                : 'text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]',
+            ]}
+            aria-current={isActive(item.href) ? 'page' : undefined}
+          >
+            {item.label}
+          </a>
+        ))
+      }
+    </nav>
+
+    <a
+      href={`mailto:${SITE.author.email}`}
+      class="inline-flex items-center gap-2 rounded-xs border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 text-xs font-semibold tracking-[0.12em] text-[var(--color-accent-fg)] uppercase transition-colors hover:bg-[var(--color-accent-hover)]"
+    >
+      Contact
+    </a>
+  </div>
+</header>

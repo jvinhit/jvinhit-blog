@@ -1,0 +1,63 @@
+---
+title: 'Scaling Micro-Frontends: A Pragmatic Approach'
+description: An exploration of Module Federation, shared state management, and breaking down monolithic UI architectures for enterprise scale applications.
+pubDate: 2024-11-18
+tags: [architecture, frontend, module-federation]
+draft: false
+---
+
+Micro-frontends promise autonomy per team, but the cost is real: orchestration,
+shared state, and deployment coordination. In this entry I document what
+worked — and what did not — across three production rollouts.
+
+## Why we moved off the monolith
+
+Our front-end codebase had grown to ~420k lines. Build time approached
+**7 minutes** on CI, and merging a typo fix blocked releases for unrelated
+teams. The boundary we needed was not technical; it was **ownership**.
+
+> A good boundary is the one your release cadence already respects.
+
+## The federation topology
+
+We settled on a **host + remotes** topology using Webpack 5 Module Federation.
+Here is the minimal shape of the host config:
+
+```ts
+// webpack.config.ts — host
+new ModuleFederationPlugin({
+  name: 'shell',
+  remotes: {
+    journal: 'journal@https://cdn.example.com/journal/remoteEntry.js',
+    billing: 'billing@https://cdn.example.com/billing/remoteEntry.js',
+  },
+  shared: {
+    react: { singleton: true, requiredVersion: '^18.0.0' },
+    'react-dom': { singleton: true },
+  },
+});
+```
+
+Two rules kept us sane:
+
+- **Version-pin shared libs** — loose ranges are how you ship React twice.
+- **Remotes own their URL resolution** — the host does not hard-code CDN
+  paths; a manifest service returns the current `remoteEntry.js` per
+  environment.
+
+## Where state lives
+
+Shared state is the part most teams get wrong. We draw a three-layer line:
+
+1. **Session identity** — owned by the shell, exposed via a custom event bus.
+2. **Cross-remote user prefs** — a CRDT stored in IndexedDB, hydrated once.
+3. **Feature-local state** — stays inside the remote. If two remotes need it,
+   it belongs at layer 2 or higher.
+
+This is the rule that has saved us the most production incidents.
+
+## Takeaways
+
+Module federation is not a solution to a code problem; it is a solution to an
+_organizational_ problem. If your teams ship on the same cadence and share
+the same release manager, you likely do not need it yet.

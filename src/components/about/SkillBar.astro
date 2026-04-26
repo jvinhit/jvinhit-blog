@@ -1,0 +1,37 @@
+---
+interface Props {
+  name: string;
+  /** 0-100 */
+  level: number;
+}
+
+const { name, level } = Astro.props;
+const clamped = Math.min(100, Math.max(0, level));
+---
+
+<div class="flex items-center gap-3">
+  <span
+    class="w-[140px] shrink-0 text-xs tracking-wider text-[var(--color-fg)] uppercase"
+  >
+    {name}
+  </span>
+  <div
+    class="relative h-2 flex-1 border border-[var(--color-border)] bg-[var(--color-surface-2)]"
+    role="progressbar"
+    aria-label={`${name} proficiency`}
+    aria-valuenow={clamped}
+    aria-valuemin="0"
+    aria-valuemax="100"
+  >
+    <div
+      class="absolute inset-y-0 left-0 bg-[var(--color-accent)]"
+      style={`width: ${clamped}%`}
+    >
+    </div>
+  </div>
+  <span
+    class="w-10 shrink-0 text-right text-xs text-[var(--color-fg-muted)] tabular-nums"
+  >
+    {clamped}%
+  </span>
+</div>

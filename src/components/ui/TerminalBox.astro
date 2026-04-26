@@ -1,0 +1,32 @@
+---
+/**
+ * Khung viền kiểu terminal panel — dùng cho mọi "card" trong design.
+ * Header hiển thị label dạng `// LABEL` đặc trưng.
+ */
+interface Props {
+  label?: string;
+  /** Nội dung hiển thị ở góc phải header (ví dụ: date, count...) */
+  meta?: string;
+  class?: string;
+}
+
+const { label, meta, class: className = '' } = Astro.props;
+---
+
+<section class:list={['terminal-box rounded-sm', className]}>
+  {
+    (label || meta) && (
+      <header class="flex items-center justify-between border-b border-dashed border-[var(--color-border-strong)] px-5 py-3">
+        {label && <span class="terminal-label font-medium">{label}</span>}
+        {meta && (
+          <span class="text-xs tracking-wider text-[var(--color-fg-subtle)] uppercase">
+            {meta}
+          </span>
+        )}
+      </header>
+    )
+  }
+  <div class="p-5">
+    <slot />
+  </div>
+</section>

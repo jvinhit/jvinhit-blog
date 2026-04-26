@@ -1,0 +1,84 @@
+---
+import '~/styles/global.css';
+import Header from '~/components/layout/Header.astro';
+import Footer from '~/components/layout/Footer.astro';
+import { SITE } from '~/lib/site-config';
+
+interface Props {
+  title?: string;
+  description?: string;
+  /** Ảnh OG (absolute URL hoặc path tương đối với site) */
+  ogImage?: string;
+  /** Disable indexing cho drafts hoặc utility pages */
+  noindex?: boolean;
+  /** Canonical URL override — mặc định tính từ current path */
+  canonical?: string;
+}
+
+const {
+  title,
+  description = SITE.description,
+  ogImage,
+  noindex = false,
+  canonical,
+} = Astro.props;
+
+const pageTitle = title ? `${title} — ${SITE.name}` : SITE.name;
+const canonicalURL = canonical
+  ? new URL(canonical, Astro.site).toString()
+  : new URL(Astro.url.pathname, Astro.site).toString();
+const ogImageURL = ogImage
+  ? new URL(ogImage, Astro.site).toString()
+  : new URL('/og-default.png', Astro.site).toString();
+---
+
+<!doctype html>
+<html lang={SITE.lang}>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="generator" content={Astro.generator} />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="canonical" href={canonicalURL} />
+    {noindex && <meta name="robots" content="noindex, nofollow" />}
+    <meta name="theme-color" content="#0a0a0a" />
+
+    <title>{pageTitle}</title>
+    <meta name="description" content={description} />
+
+    {/* Open Graph */}
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content={SITE.name} />
+    <meta property="og:title" content={pageTitle} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonicalURL} />
+    <meta property="og:image" content={ogImageURL} />
+    <meta property="og:locale" content={SITE.locale} />
+
+    {/* Twitter */}
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={pageTitle} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImageURL} />
+
+    {/* RSS */}
+    <link
+      rel="alternate"
+      type="application/rss+xml"
+      title={`${SITE.name} — RSS`}
+      href="/rss.xml"
+    />
+
+    <slot name="head" />
+  </head>
+
+  <body class="flex min-h-dvh flex-col">
+    <Header pathname={Astro.url.pathname} />
+
+    <main class="flex-1">
+      <slot />
+    </main>
+
+    <Footer />
+  </body>
+</html>
