@@ -11,10 +11,21 @@ const { pathname } = Astro.props;
 
 // So sánh active state với path đã được base-prefixed để khớp với
 // `Astro.url.pathname` (đã chứa base).
+//
+// Phải normalize trailing slash trước khi so sánh vì:
+// - `withBase('/')` luôn kết thúc bằng `/` (vd `/jvinhit-blog/`) để là
+//   href hợp lệ trỏ đến site root.
+// - `Astro.url.pathname` với config `trailingSlash: 'never'` lại KHÔNG
+//   có trailing slash (vd `/jvinhit-blog`).
+// → So thẳng sẽ miss → JOURNAL không active khi đang ở home trên GH Pages.
+const stripTrailing = (s: string) =>
+  s.length > 1 && s.endsWith('/') ? s.slice(0, -1) : s;
+
 const isActive = (href: string): boolean => {
-  const full = withBase(href);
-  if (href === '/') return pathname === full || pathname === `${full}/`;
-  return pathname === full || pathname.startsWith(`${full}/`);
+  const full = stripTrailing(withBase(href));
+  const current = stripTrailing(pathname);
+  if (href === '/') return current === full;
+  return current === full || current.startsWith(`${full}/`);
 };
 ---
 
