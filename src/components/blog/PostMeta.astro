@@ -37,10 +37,13 @@ const visibleTags = tags.slice(0, 3);
   {visibleTags.length > 0 && <span aria-hidden="true">//</span>}
 
   {
+    // `relative z-10` để tag link nổi lên trên `::after` của stretched-link
+    // pattern (xem ArticleCard, blog/index list row). Khi không có
+    // stretched-link parent, các style này vô hại.
     visibleTags.map((tag) => (
       <a
         href={withBase(`/tags/${tag}`)}
-        class="tracking-wider uppercase hover:text-[var(--color-accent)]"
+        class="relative z-10 tracking-wider uppercase hover:text-[var(--color-accent)]"
       >
         {tag}
       </a>

@@ -1,0 +1,189 @@
+---
+import type { CollectionEntry } from 'astro:content';
+
+interface Props {
+  project: CollectionEntry<'projects'>;
+}
+
+const { project } = Astro.props;
+const { title, description, status, role, period, stack, links, featured } =
+  project.data;
+
+// Primary link priority: site > demo > repo. Card stretched-link chỉ active
+// nếu có 1 trong 3, ngược lại card render plain (NDA/internal projects).
+const primaryHref = links.site ?? links.demo ?? links.repo;
+
+const STATUS_LABEL = {
+  shipped: 'SHIPPED',
+  'in-progress': 'IN_PROGRESS',
+  experiment: 'EXPERIMENT',
+  archived: 'ARCHIVED',
+} as const;
+
+// Action link config — chỉ render khi link tồn tại, theo thứ tự ưu tiên
+// hiển thị (live trước, repo, demo sau).
+const actions = [
+  links.site && { label: 'live', href: links.site },
+  links.repo && { label: 'repo', href: links.repo },
+  links.demo && { label: 'demo', href: links.demo },
+].filter((x): x is { label: string; href: string } => Boolean(x));
+---
+
+<article
+  class:list={[
+    'group terminal-box relative flex h-full flex-col px-5 py-5 transition-colors',
+    primaryHref && 'hover:bg-[var(--color-surface-2)]',
+    featured && 'sm:px-6 sm:py-6',
+  ]}
+>
+  <header class="flex items-start justify-between gap-3">
+    <span class="proj-status" data-status={status}>{STATUS_LABEL[status]}</span>
+    <span
+      class="text-xs tracking-wider text-[var(--color-fg-muted)] uppercase tabular-nums"
+    >
+      {period}
+    </span>
+  </header>
+
+  <h3
+    class:list={[
+      'mt-4 font-semibold tracking-tight',
+      featured ? 'text-2xl sm:text-3xl' : 'text-xl sm:text-2xl',
+    ]}
+  >
+    {
+      primaryHref ? (
+        <a
+          href={primaryHref}
+          target="_blank"
+          rel="noopener noreferrer"
+          class="group-hover:text-[var(--color-accent)] after:absolute after:inset-0 after:content-['']"
+        >
+          {title}
+        </a>
+      ) : (
+        <span>{title}</span>
+      )
+    }
+  </h3>
+
+  <p
+    class="mt-1 text-xs tracking-[0.12em] text-[var(--color-fg-muted)] uppercase"
+  >
+    {role}
+  </p>
+
+  <p
+    class="mt-4 text-sm leading-relaxed text-[var(--color-fg-muted)] sm:text-base"
+  >
+    {description}
+  </p>
+
+  {
+    stack.length > 0 && (
+      <ul class="mt-5 flex flex-wrap gap-1.5">
+        {stack.map((s) => (
+          <li class="border border-[var(--color-border)] px-2 py-0.5 text-[10px] tracking-wider text-[var(--color-fg-muted)] uppercase">
+            {s}
+          </li>
+        ))}
+      </ul>
+    )
+  }
+
+  {
+    actions.length > 0 && (
+      <ul class="mt-5 flex flex-wrap gap-x-4 gap-y-1 text-xs tracking-wider uppercase">
+        {actions.map((a) => (
+          // `relative z-10` để link nổi trên `::after` của stretched title.
+          <li class="relative z-10">
+            <a
+              href={a.href}
+              target="_blank"
+              rel="noopener noreferrer"
+              class="link-accent"
+            >
+              <span aria-hidden="true">↗</span> {a.label}
+            </a>
+          </li>
+        ))}
+      </ul>
+    )
+  }
+</article>
+
+<style>
+  /*
+   * Status badge — drive bằng [data-status] để 1 selector control toàn bộ.
+   * Các state khác nhau visually:
+   *   shipped     → solid accent (delivered, "đóng đinh")
+   *   in-progress → outline + dot pulse (active, "đang chạy")
+   *   experiment  → dashed border (exploratory, "tạm")
+   *   archived    → muted text only (deprecated, "lùi")
+   */
+  .proj-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4em;
+    padding: 0.2em 0.55em;
+    font-size: 0.6875rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    border: 1px solid var(--color-border);
+    /* Đảm bảo badge nằm trên ::after của stretched-link → user vẫn click
+     * được vào title bên cạnh, không bị badge "ăn" pointer event. */
+    position: relative;
+    z-index: 1;
+  }
+
+  .proj-status[data-status='shipped'] {
+    background: var(--color-accent);
+    color: var(--color-accent-fg);
+    border-color: var(--color-accent);
+    font-weight: 600;
+  }
+
+  .proj-status[data-status='in-progress'] {
+    color: var(--color-accent);
+    border-color: var(--color-accent);
+  }
+
+  .proj-status[data-status='in-progress']::before {
+    content: '';
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--color-accent);
+    box-shadow: 0 0 6px var(--color-accent);
+    animation: proj-status-pulse 1.4s ease-in-out infinite;
+  }
+
+  .proj-status[data-status='experiment'] {
+    color: var(--color-fg-muted);
+    border-color: var(--color-border-strong);
+    border-style: dashed;
+  }
+
+  .proj-status[data-status='archived'] {
+    color: var(--color-fg-subtle);
+    border-color: var(--color-border);
+  }
+
+  @keyframes proj-status-pulse {
+    0%,
+    100% {
+      opacity: 0.4;
+    }
+    50% {
+      opacity: 1;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .proj-status[data-status='in-progress']::before {
+      animation: none;
+      opacity: 1;
+    }
+  }
+</style>

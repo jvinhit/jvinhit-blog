@@ -54,27 +54,30 @@ const years = Object.keys(grouped).sort((a, b) => Number(b) - Number(a));
             </h2>
             <ul class="mt-4 divide-y divide-[var(--color-border)] border-y border-[var(--color-border)]">
               {grouped[year]!.map((post) => (
-                <li>
-                  <a
-                    href={withBase(`/blog/${post.id}`)}
-                    class="group grid grid-cols-1 items-baseline gap-2 px-3 py-4 transition-colors hover:bg-[var(--color-surface)] sm:grid-cols-[auto_1fr_auto]"
-                  >
-                    <PostMeta
-                      pubDate={post.data.pubDate}
-                      tags={post.data.tags}
-                      showArrow={false}
-                      class="sm:min-w-[120px]"
-                    />
-                    <span class="text-base font-medium group-hover:text-[var(--color-accent)]">
+                // Stacked layout: hàng 1 = title + arrow (justify-between),
+                // hàng 2 = PostMeta. Stretched-link via `::after` phủ cả <li>
+                // để click bất kỳ đâu → post page; tags trong PostMeta vẫn
+                // clickable nhờ `relative z-10` (xem PostMeta.astro).
+                <li class="group relative flex flex-col gap-1.5 px-3 py-4 transition-colors focus-within:bg-[var(--color-surface)] hover:bg-[var(--color-surface)]">
+                  <div class="flex items-baseline justify-between gap-3">
+                    <a
+                      href={withBase(`/blog/${post.id}`)}
+                      class="text-base font-medium leading-snug group-hover:text-[var(--color-accent)] after:absolute after:inset-0 after:content-[''] sm:text-lg"
+                    >
                       {post.data.title}
-                    </span>
+                    </a>
                     <span
                       aria-hidden="true"
-                      class="text-[var(--color-fg-subtle)] group-hover:text-[var(--color-accent)]"
+                      class="shrink-0 text-[var(--color-fg-subtle)] group-hover:text-[var(--color-accent)]"
                     >
                       {'>'}
                     </span>
-                  </a>
+                  </div>
+                  <PostMeta
+                    pubDate={post.data.pubDate}
+                    tags={post.data.tags}
+                    showArrow={false}
+                  />
                 </li>
               ))}
             </ul>

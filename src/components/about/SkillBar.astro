@@ -7,6 +7,10 @@ interface Props {
 
 const { name, level } = Astro.props;
 const clamped = Math.min(100, Math.max(0, level));
+
+// Animation chỉ chạy khi đang dở dang — đạt 100% là "shipped", không cần marker.
+// Cũng skip khi 0 vì không có gì để show motion.
+const inProgress = clamped > 0 && clamped < 100;
 ---
 
 <div class="flex items-center gap-3">
@@ -24,7 +28,10 @@ const clamped = Math.min(100, Math.max(0, level));
     aria-valuemax="100"
   >
     <div
-      class="absolute inset-y-0 left-0 bg-[var(--color-accent)]"
+      class:list={[
+        'absolute inset-y-0 left-0 bg-[var(--color-accent)]',
+        inProgress && 'skill-fill--running',
+      ]}
       style={`width: ${clamped}%`}
     >
     </div>
@@ -35,3 +42,65 @@ const clamped = Math.min(100, Math.max(0, level));
     {clamped}%
   </span>
 </div>
+
+<style>
+  /*
+   * "In progress" affordance — gồm 2 lớp:
+   *   1. Shimmer sweep: dải sáng quét ngang qua filled portion → "alive"
+   *   2. Caret pulse: vạch sáng nhấp nháy ở leading edge → terminal cursor metaphor
+   *
+   * Cả 2 chỉ animate `background-position` và `opacity` → paint-only, không
+   * trigger reflow. Kết hợp với `will-change: auto` mặc định → trade-off OK
+   * cho số lượng SkillBar ít (<10).
+   */
+  .skill-fill--running {
+    background-image: linear-gradient(
+      90deg,
+      transparent,
+      rgba(255, 255, 255, 0.3),
+      transparent
+    );
+    /* 60% bar-width = shimmer band đủ rộng để thấy rõ ở bar 8px tall */
+    background-size: 60% 100%;
+    background-repeat: no-repeat;
+    animation: skill-shimmer 2s linear infinite;
+  }
+
+  .skill-fill--running::after {
+    content: '';
+    position: absolute;
+    inset-block: 0;
+    right: 0;
+    width: 2px;
+    background: var(--color-accent-hover);
+    /* Glow nhẹ ra khỏi bar — match accent color cho cảm giác "phát sáng" */
+    box-shadow: 0 0 6px 1px var(--color-accent);
+    animation: skill-caret-pulse 1.2s ease-in-out infinite;
+  }
+
+  @keyframes skill-shimmer {
+    from {
+      background-position: -60% 0;
+    }
+    to {
+      background-position: 160% 0;
+    }
+  }
+
+  @keyframes skill-caret-pulse {
+    0%,
+    100% {
+      opacity: 0.55;
+    }
+    50% {
+      opacity: 1;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .skill-fill--running,
+    .skill-fill--running::after {
+      animation: none;
+    }
+  }
+</style>

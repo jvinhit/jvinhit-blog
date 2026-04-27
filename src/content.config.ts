@@ -80,4 +80,53 @@ const about = defineCollection({
   }),
 });
 
-export const collections = { posts, about };
+/**
+ * Collection cho projects/portfolio.
+ * Frontmatter-only ở v1 — body MDX optional, có thể tận dụng sau cho
+ * "case study" pages chi tiết. Glob loader cho phép organize tự do
+ * (theo năm, theo type) khi danh sách dài.
+ */
+const projects = defineCollection({
+  loader: glob({
+    pattern: '**/*.{md,mdx}',
+    base: './src/content/projects',
+  }),
+  schema: ({ image }) =>
+    z.object({
+      title: z.string().min(1).max(120),
+      description: z.string().min(1).max(280),
+      /** Trạng thái — drive visual style (badge color, animation) */
+      status: z.enum(['shipped', 'in-progress', 'experiment', 'archived']),
+      /** Vai trò trong project — e.g. "Tech Lead", "Solo", "Frontend Lead" */
+      role: z.string(),
+      /** Khoảng thời gian display — e.g. "2024", "2023-2024", "Aug 2024" */
+      period: z.string(),
+      /** Stack/tech chips (tối đa ~6 để giữ card gọn) */
+      stack: z.array(z.string()).default([]),
+      /**
+       * Links ra ngoài. Tất cả optional vì:
+       * - Project nội bộ (NDA) có thể không có demo public
+       * - Experiment có thể chỉ có repo
+       */
+      links: z
+        .object({
+          site: z.string().url().optional(),
+          repo: z.string().url().optional(),
+          demo: z.string().url().optional(),
+        })
+        .default({}),
+      /** Đề lên top, render với card lớn hơn */
+      featured: z.boolean().default(false),
+      /** Sort key — endDate desc làm primary, fallback `order` cho manual override */
+      endDate: z.coerce.date(),
+      /** Manual sort override (lower = earlier). Để trống nếu dùng endDate */
+      order: z.number().int().optional(),
+      /** Cover image — chưa dùng ở v1, reserve cho detail page tương lai */
+      cover: image().optional(),
+      coverAlt: z.string().optional(),
+      /** Ẩn project khỏi production build (dùng để draft) */
+      draft: z.boolean().default(false),
+    }),
+});
+
+export const collections = { posts, about, projects };

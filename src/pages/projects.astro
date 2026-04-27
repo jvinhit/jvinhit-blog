@@ -1,22 +1,105 @@
 ---
+import { getCollection } from 'astro:content';
 import BaseLayout from '~/layouts/BaseLayout.astro';
 import Container from '~/components/ui/Container.astro';
+import ProjectCard from '~/components/projects/ProjectCard.astro';
+
+const all = await getCollection('projects', ({ data }) =>
+  import.meta.env.PROD ? data.draft !== true : true
+);
+
+// Sort: featured trước (giữ thứ tự featured ở top); trong cùng nhóm,
+// `order` (asc) override nếu set, fallback `endDate` (desc).
+const sorted = [...all].sort((a, b) => {
+  if (a.data.featured !== b.data.featured) {
+    return a.data.featured ? -1 : 1;
+  }
+  if (a.data.order !== undefined || b.data.order !== undefined) {
+    const ao = a.data.order ?? Number.POSITIVE_INFINITY;
+    const bo = b.data.order ?? Number.POSITIVE_INFINITY;
+    if (ao !== bo) return ao - bo;
+  }
+  return b.data.endDate.getTime() - a.data.endDate.getTime();
+});
+
+const total = sorted.length;
+const shipped = sorted.filter((p) => p.data.status === 'shipped').length;
+const inProgress = sorted.filter(
+  (p) => p.data.status === 'in-progress'
+).length;
 ---
 
 <BaseLayout
   title="Projects"
-  description="Selected projects & experiments — coming soon."
+  description="Selected projects, experiments, and deprecated ventures — sorted by recency."
 >
-  <Container class="py-16">
-    <p class="terminal-label">Directory/Projects</p>
-    <h1 class="mt-3 text-3xl font-semibold sm:text-5xl">
-      <span class="text-[var(--color-accent)]">//</span> Projects
-    </h1>
-    <p class="mt-4 max-w-prose text-[var(--color-fg-muted)]">
-      Danh sách projects sẽ được hiển thị ở đây. Tạo collection
-      <code class="text-[var(--color-accent)]">projects</code> trong
-      <code class="text-[var(--color-accent)]">src/content.config.ts</code> và map
-      vào page này khi bạn sẵn sàng.
-    </p>
+  <Container class="pt-12 pb-16">
+    <header
+      class="border-b border-dashed border-[var(--color-border-strong)] pb-6"
+    >
+      <p class="terminal-label">Directory/Projects</p>
+      <h1 class="mt-3 text-3xl font-semibold tracking-tight sm:text-5xl">
+        <span class="text-[var(--color-accent)]">//</span> Projects
+      </h1>
+      <p class="mt-3 max-w-prose text-[var(--color-fg-muted)]">
+        Selected work — shipped products, ongoing builds, and experiments.
+        Sorted by recency. Some entries omit live links due to NDA or internal
+        deployment.
+      </p>
+
+      {
+        total > 0 && (
+          <dl class="mt-5 flex flex-wrap gap-x-6 gap-y-2 text-xs tracking-wider text-[var(--color-fg-muted)] uppercase">
+            <div class="flex items-baseline gap-2">
+              <dt class="text-[var(--color-fg-subtle)]">Total</dt>
+              <dd class="text-[var(--color-fg)] tabular-nums">
+                {total.toString().padStart(2, '0')}
+              </dd>
+            </div>
+            <div class="flex items-baseline gap-2">
+              <dt class="text-[var(--color-fg-subtle)]">Shipped</dt>
+              <dd class="text-[var(--color-fg)] tabular-nums">
+                {shipped.toString().padStart(2, '0')}
+              </dd>
+            </div>
+            {inProgress > 0 && (
+              <div class="flex items-baseline gap-2">
+                <dt class="text-[var(--color-fg-subtle)]">In_progress</dt>
+                <dd class="text-[var(--color-accent)] tabular-nums">
+                  {inProgress.toString().padStart(2, '0')}
+                </dd>
+              </div>
+            )}
+          </dl>
+        )
+      }
+    </header>
+
+    {
+      total === 0 ? (
+        <p class="mt-8 text-sm text-[var(--color-fg-muted)]">
+          Chưa có project nào. Tạo file{' '}
+          <code class="text-[var(--color-accent)]">
+            src/content/projects/your-project.md
+          </code>{' '}
+          với frontmatter khớp schema trong{' '}
+          <code class="text-[var(--color-accent)]">src/content.config.ts</code>{' '}
+          để hiển thị tại đây.
+        </p>
+      ) : (
+        <ul class="mt-8 grid gap-4 sm:grid-cols-2 sm:gap-5">
+          {sorted.map((project) => (
+            <li
+              class:list={[
+                project.data.featured && 'sm:col-span-2',
+                'flex',
+              ]}
+            >
+              <ProjectCard project={project} />
+            </li>
+          ))}
+        </ul>
+      )
+    }
   </Container>
 </BaseLayout>
