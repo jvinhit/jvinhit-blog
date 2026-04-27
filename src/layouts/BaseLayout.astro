@@ -37,6 +37,21 @@ const ogImageURL = ogImage
 <!doctype html>
 <html lang={SITE.lang}>
   <head>
+    {/* Sync flag để CSS/script biết môi trường client capabilities trước
+     * khi paint đầu tiên — tránh FOUC cho hero typing animation. */}
+    <script is:inline>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
+            d.classList.add('reduced-motion');
+          }
+        } catch (_) {
+          /* matchMedia not available — leave default */
+        }
+      })();
+    </script>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <meta name="generator" content={Astro.generator} />

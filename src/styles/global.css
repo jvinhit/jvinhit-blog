@@ -118,3 +118,47 @@
     color: var(--color-accent-hover);
   }
 }
+
+/* =============================================================================
+ * Hero typing animation
+ *
+ * - HTML render full text (SEO + no-JS fallback).
+ * - `html.js:not(.reduced-motion) [data-typing-target]`: ẩn (visibility) trước
+ *   khi script kịp chạy → tránh flash full text rồi reset về empty.
+ * - Khi script start, nó set `data-typing-state="running"` rồi tự reveal.
+ * - User có `prefers-reduced-motion: reduce` → không hide, không animate.
+ * ============================================================================= */
+html.js:not(.reduced-motion) [data-typing-target] {
+  visibility: hidden;
+}
+html.js:not(.reduced-motion) [data-typing-target][data-typing-state='running'],
+html.js:not(.reduced-motion) [data-typing-target][data-typing-state='done'] {
+  visibility: visible;
+}
+
+.typing-caret {
+  display: inline-block;
+  width: 0.55em;
+  height: 1em;
+  margin-left: 0.08em;
+  vertical-align: -0.12em;
+  background: var(--color-accent);
+  animation: typing-blink 1s steps(2) infinite;
+}
+
+/* Khi đang gõ chữ, cursor solid (không nháy) — JS toggle [data-blink="off"]. */
+.typing-caret[data-blink='off'] {
+  animation: none;
+  opacity: 1;
+}
+
+@keyframes typing-blink {
+  0%,
+  50% {
+    opacity: 1;
+  }
+  50.01%,
+  100% {
+    opacity: 0;
+  }
+}

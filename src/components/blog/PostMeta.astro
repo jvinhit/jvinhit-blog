@@ -48,20 +48,19 @@ const visibleTags = tags.slice(0, 3);
   }
 
   {
-    readingMinutes !== undefined && (
-      <>
-        <span aria-hidden="true" class="ml-auto">
-          {readingMinutes} MIN READ
-        </span>
-      </>
-    )
-  }
-
-  {
-    showArrow && (
-      <span aria-hidden="true" class="ml-auto text-[var(--color-fg-subtle)]">
-        {'>'}
-      </span>
+    (readingMinutes !== undefined || showArrow) && (
+      // Right-aligned cluster: gom MIN READ + arrow để chỉ có 1 ml-auto
+      // duy nhất push cả cụm về phải, các item bên trong sit cạnh nhau.
+      <div class="ml-auto flex items-center gap-2">
+        {readingMinutes !== undefined && (
+          <span aria-hidden="true">{readingMinutes} MIN READ</span>
+        )}
+        {showArrow && (
+          <span aria-hidden="true" class="text-[var(--color-fg-subtle)]">
+            {'>'}
+          </span>
+        )}
+      </div>
     )
   }
 </div>

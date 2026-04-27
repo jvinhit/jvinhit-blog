@@ -34,11 +34,13 @@ const totalPosts = sortedPosts.length;
 <BaseLayout>
   <Container class="pt-12 pb-16 sm:pt-16">
     {/* Hero */}
-    <section class="border-b border-[var(--color-border)] pb-10">
+    <section class="border-b border-[var(--color-border)] pb-10" data-hero>
       <p class="terminal-label">System/Initialized</p>
 
       <h1
         class="mt-6 text-4xl leading-[1.1] font-semibold tracking-tight sm:text-6xl md:text-7xl"
+        data-typing-target
+        data-typing-speed="65"
       >
         Hi, I'm <span class="text-[var(--color-accent)]"
           >{SITE.author.name}</span
@@ -47,6 +49,9 @@ const totalPosts = sortedPosts.length;
 
       <p
         class="mt-6 max-w-[640px] text-base leading-relaxed text-[var(--color-fg-muted)] sm:text-lg"
+        data-typing-target
+        data-typing-speed="18"
+        data-typing-delay="200"
       >
         {SITE.description}
       </p>
@@ -68,6 +73,130 @@ const totalPosts = sortedPosts.length;
         </a>
       </div>
     </section>
+
+    <script>
+      /**
+       * Hero typing animation
+       *
+       * Design:
+       * - Markup chứa text đầy đủ → SEO + no-JS đều thấy nội dung.
+       * - CSS hide bằng `visibility:hidden` trước khi script chạy (chỉ khi
+       *   `html.js` && không reduced-motion).
+       * - Script snapshot child structure (giữ <span> styling), clear, rồi
+       *   gõ từng char. Cursor hiển thị ở block đang gõ; xong thì stay ở cuối.
+       * - Skip toàn bộ animation nếu user prefers-reduced-motion.
+       */
+      type Segment = {
+        text: string;
+        tag: string | null;
+        className: string | null;
+      };
+
+      const wait = (ms: number) =>
+        new Promise<void>((res) => setTimeout(res, ms));
+
+      function snapshot(el: HTMLElement): Segment[] {
+        const segs: Segment[] = [];
+        el.childNodes.forEach((node) => {
+          if (node.nodeType === Node.TEXT_NODE) {
+            segs.push({
+              text: node.textContent ?? '',
+              tag: null,
+              className: null,
+            });
+          } else if (node.nodeType === Node.ELEMENT_NODE) {
+            const e = node as HTMLElement;
+            segs.push({
+              text: e.textContent ?? '',
+              tag: e.tagName.toLowerCase(),
+              className: e.className || null,
+            });
+          }
+        });
+        return segs;
+      }
+
+      function makeCaret(): HTMLSpanElement {
+        const c = document.createElement('span');
+        c.className = 'typing-caret';
+        c.dataset.blink = 'off';
+        c.setAttribute('aria-hidden', 'true');
+        return c;
+      }
+
+      async function typeInto(
+        el: HTMLElement,
+        segs: Segment[],
+        caret: HTMLSpanElement,
+        speed: number
+      ): Promise<void> {
+        el.innerHTML = '';
+        el.appendChild(caret);
+
+        for (const seg of segs) {
+          if (seg.text.length === 0) continue;
+
+          let container: HTMLElement | Text;
+          if (seg.tag) {
+            const node = document.createElement(seg.tag);
+            if (seg.className) node.className = seg.className;
+            container = node;
+          } else {
+            container = document.createTextNode('');
+          }
+          // Insert container TRƯỚC caret để caret luôn ở đuôi.
+          el.insertBefore(container, caret);
+
+          for (const char of seg.text) {
+            if (container instanceof Text) {
+              container.data += char;
+            } else {
+              container.textContent = (container.textContent ?? '') + char;
+            }
+            await wait(speed);
+          }
+        }
+      }
+
+      async function run() {
+        const reduced = matchMedia(
+          '(prefers-reduced-motion: reduce)'
+        ).matches;
+        if (reduced) return;
+
+        const targets = Array.from(
+          document.querySelectorAll<HTMLElement>('[data-typing-target]')
+        );
+        if (targets.length === 0) return;
+
+        // Snapshot TRƯỚC khi clear bất cứ element nào.
+        const snapshots = targets.map((el) => snapshot(el));
+
+        const caret = makeCaret();
+
+        for (let i = 0; i < targets.length; i++) {
+          const el = targets[i]!;
+          const segs = snapshots[i]!;
+          const speed = Number(el.dataset.typingSpeed ?? 30);
+          const delay = Number(el.dataset.typingDelay ?? 0);
+
+          if (delay > 0) await wait(delay);
+
+          el.dataset.typingState = 'running';
+          await typeInto(el, segs, caret, speed);
+          el.dataset.typingState = 'done';
+        }
+
+        // Hoàn tất → caret blink ở vị trí cuối block cuối cùng.
+        caret.dataset.blink = 'on';
+      }
+
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', run, { once: true });
+      } else {
+        run();
+      }
+    </script>
 
     {/* Latest entries */}
     <section class="mt-10">

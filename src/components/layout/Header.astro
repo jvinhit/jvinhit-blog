@@ -1,4 +1,5 @@
 ---
+import { Menu, X } from '@lucide/astro';
 import { SITE, withBase } from '~/lib/site-config';
 
 interface Props {
@@ -17,9 +18,9 @@ const isActive = (href: string): boolean => {
 };
 ---
 
-<header class="border-b border-[var(--color-border)]">
+<header class="relative border-b border-[var(--color-border)]">
   <div
-    class="mx-auto flex h-14 max-w-[1184px] items-center justify-between px-6 sm:px-10"
+    class="mx-auto flex h-14 max-w-[1184px] items-center justify-between gap-3 px-6 sm:px-10"
   >
     <a
       href={withBase('/')}
@@ -29,6 +30,7 @@ const isActive = (href: string): boolean => {
       {SITE.handle}
     </a>
 
+    {/* Desktop nav */}
     <nav class="hidden items-center gap-1 md:flex" aria-label="Primary">
       {
         SITE.nav.map((item) => (
@@ -48,11 +50,157 @@ const isActive = (href: string): boolean => {
       }
     </nav>
 
-    <a
-      href={`mailto:${SITE.author.email}`}
-      class="inline-flex items-center gap-2 rounded-xs border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 text-xs font-semibold tracking-[0.12em] text-[var(--color-accent-fg)] uppercase transition-colors hover:bg-[var(--color-accent-hover)]"
-    >
-      Contact
-    </a>
+    {/* Right cluster: contact (>=sm) + hamburger (<md) */}
+    <div class="flex items-center gap-2">
+      <a
+        href={`mailto:${SITE.author.email}`}
+        class="hidden items-center gap-2 rounded-xs border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 text-xs font-semibold tracking-[0.12em] text-[var(--color-accent-fg)] uppercase transition-colors hover:bg-[var(--color-accent-hover)] sm:inline-flex"
+      >
+        Contact
+      </a>
+
+      <button
+        type="button"
+        class="inline-flex h-9 w-9 items-center justify-center rounded-xs border border-[var(--color-border-strong)] text-[var(--color-fg)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] md:hidden"
+        aria-label="Toggle menu"
+        aria-expanded="false"
+        aria-controls="mobile-nav"
+        data-mobile-toggle
+      >
+        <Menu class="h-5 w-5" data-icon-open aria-hidden="true" />
+        <X class="hidden h-5 w-5" data-icon-close aria-hidden="true" />
+      </button>
+    </div>
   </div>
+
+  {/* Mobile drawer — animation qua [data-state] */}
+  <nav
+    id="mobile-nav"
+    class="absolute inset-x-0 top-full z-40 origin-top border-b border-[var(--color-border)] bg-[var(--color-bg)] shadow-[0_24px_40px_-12px_rgba(0,0,0,0.7)] transition-[transform,opacity,visibility] duration-200 ease-out md:hidden"
+    aria-label="Mobile primary"
+    data-mobile-drawer
+    data-state="closed"
+    inert
+  >
+    <ul class="flex flex-col py-2">
+      {
+        SITE.nav.map((item) => (
+          <li>
+            <a
+              href={withBase(item.href)}
+              class:list={[
+                'block border-l-2 px-6 py-3 text-sm tracking-[0.12em] uppercase transition-colors',
+                isActive(item.href)
+                  ? 'border-[var(--color-accent)] text-[var(--color-accent)]'
+                  : 'border-transparent text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]',
+              ]}
+              aria-current={isActive(item.href) ? 'page' : undefined}
+              data-mobile-link
+            >
+              {item.label}
+            </a>
+          </li>
+        ))
+      }
+      <li class="mt-2 border-t border-dashed border-[var(--color-border)] px-6 pt-3 pb-4 sm:hidden">
+        <a
+          href={`mailto:${SITE.author.email}`}
+          class="inline-flex items-center gap-2 rounded-xs border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 text-xs font-semibold tracking-[0.12em] text-[var(--color-accent-fg)] uppercase hover:bg-[var(--color-accent-hover)]"
+          data-mobile-link
+        >
+          Contact
+        </a>
+      </li>
+    </ul>
+  </nav>
 </header>
+
+<style>
+  /* Drawer transition states — drive bằng [data-state] thay vì class
+   * để JS chỉ cần set 1 attribute, tránh xung đột với Tailwind utilities.
+   */
+  [data-mobile-drawer][data-state='closed'] {
+    visibility: hidden;
+    opacity: 0;
+    transform: translateY(-8px);
+    pointer-events: none;
+  }
+  [data-mobile-drawer][data-state='open'] {
+    visibility: visible;
+    opacity: 1;
+    transform: translateY(0);
+  }
+</style>
+
+<script>
+  /**
+   * Mobile nav drawer controller.
+   * Thiết kế để chạy 1 lần khi DOM ready — không cần idempotent vì Astro
+   * không hot-reload thẻ <script> default; nếu sau này dùng View Transitions
+   * thì wrap vào astro:page-load event.
+   */
+  function init() {
+    const toggle = document.querySelector<HTMLButtonElement>(
+      '[data-mobile-toggle]'
+    );
+    const drawer = document.querySelector<HTMLElement>('[data-mobile-drawer]');
+    const iconOpen = toggle?.querySelector<SVGElement>('[data-icon-open]');
+    const iconClose = toggle?.querySelector<SVGElement>('[data-icon-close]');
+    if (!toggle || !drawer || !iconOpen || !iconClose) return;
+
+    const setState = (open: boolean) => {
+      drawer.dataset.state = open ? 'open' : 'closed';
+      toggle.setAttribute('aria-expanded', String(open));
+      // `inert` tách drawer khỏi tab order + a11y tree khi đóng,
+      // bỏ qua focus trap phức tạp.
+      if (open) drawer.removeAttribute('inert');
+      else drawer.setAttribute('inert', '');
+      iconOpen.classList.toggle('hidden', open);
+      iconClose.classList.toggle('hidden', !open);
+      document.body.style.overflow = open ? 'hidden' : '';
+    };
+
+    toggle.addEventListener('click', () => {
+      const isOpen = drawer.dataset.state === 'open';
+      setState(!isOpen);
+    });
+
+    // Đóng khi click 1 link trong drawer (cho phép navigation diễn ra
+    // bình thường nhưng UX feel "menu đóng lại").
+    drawer.querySelectorAll<HTMLAnchorElement>('[data-mobile-link]').forEach(
+      (link) => {
+        link.addEventListener('click', () => setState(false));
+      }
+    );
+
+    // ESC để đóng — match expectation của OS-level menu.
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && drawer.dataset.state === 'open') {
+        setState(false);
+        toggle.focus();
+      }
+    });
+
+    // Click outside header → đóng. Dùng pointerdown để bắt cả touch/mouse.
+    document.addEventListener('pointerdown', (e) => {
+      if (drawer.dataset.state !== 'open') return;
+      const target = e.target as Node;
+      if (!drawer.contains(target) && !toggle.contains(target)) {
+        setState(false);
+      }
+    });
+
+    // Đóng khi resize lên >= md (Tailwind default 768px) để tránh kẹt
+    // state khi user xoay device hoặc resize browser.
+    const mql = window.matchMedia('(min-width: 768px)');
+    mql.addEventListener('change', (e) => {
+      if (e.matches && drawer.dataset.state === 'open') setState(false);
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init, { once: true });
+  } else {
+    init();
+  }
+</script>
