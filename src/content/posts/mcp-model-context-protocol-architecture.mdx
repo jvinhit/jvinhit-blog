@@ -1,0 +1,406 @@
+---
+title: 'MCP (Model Context Protocol) - Kiến trúc chi tiết'
+description: 'Tìm hiểu về MCP - chuẩn kết nối mở cho AI Agents như Claude, Cursor, Copilot: transport layer, JSON-RPC 2.0, primitives và sơ đồ kiến trúc đầy đủ.'
+pubDate: 2026-04-25
+tags: [mcp, model-context-protocol, ai, cursor, claude, copilot]
+draft: false
+---
+
+## MCP là gì?
+
+**MCP (Model Context Protocol)** là một chuẩn protocol mở để kết nối ứng dụng AI với các hệ thống bên ngoài. Bạn có thể hình dung nó giống như **USB-C** — một chuẩn kết nối chung cho phép các thiết bị (ứng dụng AI) kết nối với nhiều loại thiết bị ngoại vi (dữ liệu, tools, workflows) khác nhau.
+
+Các AI Agent phổ biến hỗ trợ MCP: **Claude (Desktop/Code)**, **Cursor**, **VS Code (Copilot)**, **ChatGPT**...
+
+---
+
+## 2 loại kết nối (Transport Layer)
+
+### 1. Stdio Transport (Local - cùng máy)
+
+- Giao tiếp qua **stdin/stdout** của process
+- Dùng cho các server chạy **local** trên cùng máy
+- Không có network overhead, hiệu suất cao
+- Thường dùng với `npx` hoặc `command` trực tiếp
+
+### 2. Streamable HTTP Transport (Remote - từ xa)
+
+- Giao tiếp qua **HTTP POST**
+- Hỗ trợ **Server-Sent Events (SSE)** cho streaming
+- Dùng cho server ở **remote** (cloud, server khác)
+- Hỗ trợ authentication: Bearer token, API keys, OAuth
+
+---
+
+## JSON Format - JSON-RPC 2.0
+
+MCP sử dụng **JSON-RPC 2.0** làm protocol giao tiếp. Tất cả messages đều theo format:
+
+### Initialize Request
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "initialize",
+  "params": {
+    "protocolVersion": "2025-06-18",
+    "capabilities": {
+      "tools": {},
+      "resources": {}
+    },
+    "clientInfo": {
+      "name": "cursor",
+      "version": "1.0.0"
+    }
+  }
+}
+```
+
+### Tool Call Request
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "tools/call",
+  "params": {
+    "name": "weather_current",
+    "arguments": {
+      "location": "San Francisco",
+      "units": "imperial"
+    }
+  }
+}
+```
+
+### Tool Call Response
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "Current weather in San Francisco: 68°F"
+      }
+    ]
+  }
+}
+```
+
+---
+
+## Cấu hình MCP trong các AI Agents
+
+### Claude Desktop / Claude Code
+
+File config: `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/vince/Documents"]
+    },
+    "weather-remote": {
+      "url": "https://api.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_TOKEN"
+      }
+    }
+  }
+}
+```
+
+### Cursor
+
+File config: `~/.cursor/mcp.json` hoặc qua Settings > MCP
+
+```json
+{
+  "mcpServers": {
+    "database": {
+      "command": "node",
+      "args": ["/path/to/database-server.js"]
+    }
+  }
+}
+```
+
+### VS Code (Copilot)
+
+```json
+{
+  "mcpServers": {
+    "sentry": {
+      "command": "npx",
+      "args": ["-y", "@sentry/mcp-server"]
+    }
+  }
+}
+```
+
+---
+
+## Các thành phần chính (Primitives)
+
+MCP cung cấp 3 loại primitives:
+
+| Loại          | Mô tả                     | Ví dụ                                |
+| ------------- | ------------------------- | ------------------------------------ |
+| **Tools**     | Functions AI có thể gọi   | Tính toán, gọi API, query database   |
+| **Resources** | Data context cho AI       | File contents, database schema       |
+| **Prompts**   | Templates cho interactions | System prompts, few-shot examples    |
+
+---
+
+## Tóm tắt các loại kết nối
+
+| Loại            | Transport | Cấu hình            | Dùng khi                                       |
+| --------------- | --------- | ------------------- | ---------------------------------------------- |
+| **Local Stdio** | stdio     | `command` + `args`  | Server chạy local, dùng `npx`, `node`, `python` |
+| **Remote HTTP** | HTTP/SSE  | `url` + `headers`   | Server ở cloud/remote, cần authentication       |
+
+**Ví dụ command phổ biến:**
+
+```jsonc
+// Local với npx
+{ "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path"] }
+
+// Local với Python
+{ "command": "python", "args": ["server.py"] }
+
+// Remote HTTP
+{ "url": "https://mcp-server.example.com", "headers": { "Authorization": "Bearer token" } }
+```
+
+---
+
+## Kiến trúc MCP - Sơ đồ chi tiết
+
+### 1. Tổng quan Architecture
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            AI APPLICATION (Host)                            │
+│                    Claude Desktop / Cursor / VS Code / ChatGPT              │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                       │
+                                       ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          MCP HOST LAYER                                     │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                    MCP Client Manager                               │    │
+│  │         (Quản lý multiple MCP Client connections)                   │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                    │                    │                    │              │
+│                    ▼                    ▼                    ▼              │
+│            ┌────────────┐        ┌──────────┐          ┌──────────┐         │
+│            │ Client #1  │        │Client #2 │          │Client #3 │         │
+│            │(Filesystem)│        │(Database)│          │(Remote)  │         │
+│            └────────────┘        └──────────┘          └──────────┘         │
+└─────────────────────────────────────────────────────────────────────────────┘
+              │                        │                        │
+              ▼                        ▼                        ▼
+     ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐
+     │   STDIO          │    │   STDIO          │    │   HTTP           │
+     │   TRANSPORT      │    │   TRANSPORT      │    │   TRANSPORT      │
+     │  (Local Process) │    │  (Local Process) │    │  (Remote)        │
+     └──────────────────┘    └──────────────────┘    └──────────────────┘
+              │                        │                        │
+              ▼                        ▼                        ▼
+     ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐
+     │ MCP Server       │    │ MCP Server       │    │ MCP Server       │
+     │ - Filesystem     │    │ - PostgreSQL     │    │ - Sentry         │
+     │ - Git            │    │ - Redis          │    │ - Notion         │
+     │                  │    │                  │    │ - GitHub         │
+     └──────────────────┘    └──────────────────┘    └──────────────────┘
+              │                        │                        │
+              ▼                        ▼                        ▼
+     ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐
+     │ External Systems │    │ External Systems │    │ External Systems │
+     │ - Local Files    │    │ - Databases      │    │ - APIs           │
+     │ - Process        │    │ - External APIs  │    │ - Cloud Services │
+     └──────────────────┘    └──────────────────┘    └──────────────────┘
+```
+
+---
+
+### 2. Layer Architecture (3 Layers)
+
+```text
+┌─────────────────────────────────────────────────────────────────┐
+│                    APPLICATION LAYER                            │
+│  AI App (Claude, Cursor, Copilot) + User + LLM                  │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    DATA LAYER (JSON-RPC 2.0)                    │
+│                                                                 │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
+│  │   TOOLS     │  │  RESOURCES  │  │       PROMPTS           │  │
+│  │ (actions)   │  │  (data)     │  │  (templates)            │  │
+│  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
+│                                                                 │
+│  Lifecycle: initialize → capabilities → tools/list → tools/call │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    TRANSPORT LAYER                              │
+│                                                                 │
+│    ┌─────────────────────┐    ┌─────────────────────────────┐   │
+│    │    STDIO            │    │    STREAMABLE HTTP          │   │
+│    │  (local process)    │    │    (remote server)          │   │
+│    │                     │    │                             │   │
+│    │  stdin  ──────► stdout    │  POST + SSE                 │   │
+│    │  ◄────── stdout           │  OAuth/Bearer Token         │   │
+│    └─────────────────────┘    └─────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### 3. Data Flow - Tool Call Lifecycle
+
+```text
+┌──────────────┐     initialize      ┌──────────────┐
+│              │ ─────────────────►  │              │
+│  MCP Client  │                     │ MCP Server   │
+│  (Host)      │  ◄───────────────── │ (Tool        │
+│              │   capabilities      │  Provider)   │
+└──────────────┘                     └──────────────┘
+       │                                     │
+       │     tools/list                      │
+       │ ─────────────────────────────────►  │
+       │  ◄────────────────────────────────  │
+       │     [tool1, tool2, tool3]           │
+       │                                     │
+       │     tools/call                      │
+       │     {name: "read_file",             │
+       │      args: {path: "a.txt"}}         │
+       │ ─────────────────────────────────►  │
+       │                                     │
+       │                                     ▼
+       │                             ┌──────────────┐
+       │                             │ File System  │
+       │                             │ (External)   │
+       │                             └──────────────┘
+       │                                     │
+       │     {content: [{type: "text",       │
+       │       text: "file content..."}]}    │
+       │ ◄────────────────────────────────   │
+       │                                     │
+       ▼                                     ▼
+┌──────────────┐                      ┌──────────────┐
+│   LLM        │◄─────────────────────│              │
+│   (analyzes  │   tool result        │  Done!       │
+│    & responds│                      │              │
+└──────────────┘                      └──────────────┘
+```
+
+---
+
+### 4. Giải thích từng thành phần
+
+| Thành phần      | Vai trò                              | Ví dụ                                |
+| --------------- | ------------------------------------ | ------------------------------------ |
+| **MCP Host**    | Ứng dụng AI điều phối mọi thứ        | Claude Desktop, Cursor, VS Code      |
+| **MCP Client**  | Kết nối & giao tiếp với 1 server     | Client object trong code             |
+| **MCP Server**  | Cung cấp tools/resources/prompts     | filesystem server, database server   |
+| **Transport**   | Cách truyền dữ liệu                  | stdio (local), HTTP (remote)         |
+| **Primitives**  | Các loại capability                  | Tools, Resources, Prompts            |
+
+---
+
+### 5. So sánh STDIO vs HTTP
+
+#### STDIO (Local)
+
+- Chạy trên cùng máy
+- Giao tiếp qua stdin/stdout
+- Command: `npx`, `node`, `python`, `go run`...
+- Không cần network
+- Tốc độ nhanh, latency thấp
+
+```json
+{ "command": "npx", "args": ["-y", "@modelcontextprotocol/..."] }
+```
+
+#### STREAMABLE HTTP (Remote)
+
+- Chạy trên remote server
+- Giao tiếp qua HTTP POST + SSE
+- Hỗ trợ OAuth, Bearer Token, API Keys
+- Có thể scale nhiều clients
+- Dùng cho cloud services
+
+```json
+{ "url": "https://api.example.com/mcp", "headers": { "Authorization": "Bearer ..." } }
+```
+
+---
+
+### 6. Ví dụ JSON-RPC Messages
+
+#### REQUEST (Client → Server)
+
+```jsonc
+{
+  "jsonrpc": "2.0",           // Version
+  "id": 1,                    // Unique ID for tracking
+  "method": "tools/call",     // Method name
+  "params": {                 // Parameters
+    "name": "read_file",
+    "arguments": { "path": "/data/config.json" }
+  }
+}
+```
+
+#### RESPONSE (Server → Client)
+
+```jsonc
+// Success
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": [{
+      "type": "text",
+      "text": "file content here..."
+    }]
+  }
+}
+
+// Error
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": { "code": -32600, "message": "Invalid Request" }
+}
+```
+
+---
+
+## Tóm tắt
+
+| Layer           | Công nghệ              | Vai trò                                    |
+| --------------- | ---------------------- | ------------------------------------------ |
+| **Application** | Claude/Cursor/Copilot  | UI + LLM orchestration                     |
+| **Data Layer**  | JSON-RPC 2.0           | Định nghĩa messages, tools, resources       |
+| **Transport**   | STDIO / HTTP           | Truyền bytes giữa client và server          |
+
+> **MCP giống như USB-C cho AI** — không cần biết thiết bị ngoại vi là gì, chỉ cần cắm vào là chạy.
+
+---
+
+## Nguồn tham khảo
+
+- [Model Context Protocol - Official Docs](https://modelcontextprotocol.io/introduction)
+- [MCP Architecture](https://modelcontextprotocol.io/docs/learn/architecture)
+- [MCP Specification](https://modelcontextprotocol.io/specification/latest)

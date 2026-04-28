@@ -1,0 +1,420 @@
+---
+title: 'GitHub Pages + Actions — Deploy, Lưu trữ & Giới hạn'
+description: 'Hiểu rõ cách GitHub Pages deploy site qua Actions, 3 loại storage tách biệt, các soft/hard limit thực tế, URL structure (user vs project vs custom domain), và khi nào nên migrate sang Cloudflare/Vercel.'
+pubDate: 2026-04-29
+tags: [github-pages, deployment, ci-cd, github-actions, devops]
+draft: false
+---
+
+GitHub Pages là một trong những cách deploy static site **rẻ và bền vững nhất**:
+miễn phí, HTTPS auto, CDN toàn cầu (Fastly), không cần credit card. Nhưng nhiều
+người dùng cả năm vẫn không biết:
+
+- Site mình thực ra lưu **ở đâu**?
+- Build artifact đi đâu sau khi workflow chạy xong?
+- Limit thực tế là bao nhiêu?
+- Khi nào nên rời sang Vercel/Cloudflare?
+
+Bài này tổng hợp toàn bộ — đủ để bạn deploy & vận hành tự tin.
+
+---
+
+## 1. Hai "thế hệ" deploy của GitHub Pages
+
+GitHub Pages có **2 cách deploy** rất khác nhau. Hiểu cả 2 là chìa khoá.
+
+### Legacy — Branch-based
+
+```text
+Push code to  gh-pages  branch  ──►  GitHub auto-build với Jekyll
+                │                                │
+                └─► Serve nội dung                │
+                    của branch đó                  ▼
+                                           https://<user>.github.io/<repo>/
+```
+
+- Cần 1 branch riêng (thường `gh-pages` hoặc folder `/docs` trong `main`).
+- GH **tự chạy Jekyll** — không kiểm soát toolchain.
+- Với Astro/Next/Vite → phải `npm run build` ở local, commit `dist/` vào
+  `gh-pages` branch → bẩn git history, blow up `.git` size.
+- Đang dần bị **deprecate** cho workflow modern.
+
+### Modern — GitHub Actions (recommended)
+
+```text
+Push to main  ──►  GH Actions runner  ──►  Build artifact  ──►  Pages deployment
+                        │                        │                      │
+                   Ubuntu VM                Upload .tar.gz         Serve từ
+                   chạy build               (artifact riêng)       GitHub CDN
+```
+
+- **Không cần** branch `gh-pages`, không commit `dist/`.
+- Build artifact lưu **tách biệt** khỏi Git repo.
+- 100% kiểm soát toolchain (Node 22, pnpm, bất kỳ gì).
+- Đây là cách GitHub đang push cho mọi framework modern.
+
+Bài này tập trung vào **cách 2**.
+
+---
+
+## 2. Anatomy một workflow Pages chuẩn
+
+Một workflow tối giản nhưng đầy đủ trông như sau:
+
+```yaml
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read       # đọc repo
+  pages: write         # deploy lên Pages
+  id-token: write      # OIDC token để auth với Pages API
+
+concurrency:
+  group: pages
+  cancel-in-progress: false  # KHÔNG cancel deploy đang chạy
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - uses: actions/configure-pages@v5
+        with: { enablement: true }
+      - env:
+          SITE_URL: https://<user>.github.io
+          BASE_PATH: /<repo>
+        run: npm run build
+      - uses: actions/upload-pages-artifact@v3
+        with: { path: ./dist }
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@v4
+        id: deployment
+```
+
+### Vài dòng quan trọng cần hiểu
+
+**`permissions:`** — least-privilege principle. Job chỉ có đúng quyền cần,
+không hơn. Mặc định Actions có quyền rộng → khai báo tường minh sẽ an toàn hơn.
+
+**`concurrency: cancel-in-progress: false`** — nghĩa là nếu đang có deploy
+chạy, push thứ 2 **xếp hàng đợi**, không cancel. Tránh case half-deploy khi 2
+build chạy song song ghi đè nhau.
+
+**`enablement: true`** — tự động bật Pages trong repo settings lần đầu, không
+cần vào Settings → Pages bật thủ công.
+
+**`SITE_URL` + `BASE_PATH`** — env truyền sang build tool (Astro/Vite/Next).
+Quyết định canonical URL & asset prefix. Sai chỗ này → site 404.
+
+**Tách 2 jobs `build` + `deploy`** — nếu build fail, deploy không chạy → site
+cũ vẫn live. Zero downtime by design.
+
+---
+
+## 3. Site của bạn được LƯU ở đâu?
+
+Đây là phần đa số dev không nắm rõ. Có **3 loại storage tách biệt**:
+
+```text
+┌──────────────────────────────────────────────────────────┐
+│  3 loại storage khi dùng GH Actions deploy               │
+│                                                          │
+│  1. Git repo       ← source code (.astro, .mdx, public/) │
+│  2. Artifact store ← build output tạm (1 ngày)           │
+│  3. Pages serve    ← deployment hiện tại + CDN cache     │
+└──────────────────────────────────────────────────────────┘
+```
+
+### A. Git repo (source code)
+
+`.astro`, `.mdx`, `public/` — như bình thường, branch `main`.
+
+### B. Artifact storage (tạm thời)
+
+```text
+actions/upload-pages-artifact ──► GH Actions artifact storage
+                                        │
+                                  Lưu .tar.gz build output
+                                        │
+                                  Retention: 1 ngày (Pages)
+                                  Hoặc 90 ngày (artifact thường)
+```
+
+- Là blob **tách biệt** khỏi Git repo.
+- Pages artifact auto-delete sau **1 ngày** (đặc biệt) → không tốn storage lâu dài.
+- Xem ở: Repo → Actions → workflow run → Artifacts tab.
+
+### C. Pages CDN (production)
+
+```text
+Artifact ──► Pages deployment storage ──► CDN edge nodes
+   │              │                            │
+   │       (S3-like blob)               (Fastly CDN toàn cầu)
+   │              │                            │
+   │         Chỉ giữ bản                  Cache ~10 phút
+   │         deployment hiện              cho mỗi edge
+   │         tại + few rollback
+   ▼
+.tar.gz extracted
+```
+
+- Mỗi deploy **ghi đè** bản trước (giữ current + few rollback copies).
+- Serve qua **Fastly CDN** — tốc độ global tốt.
+- TLS free (Let's Encrypt) cho cả GH subdomain và custom domain.
+
+---
+
+## 4. Giới hạn — bảng tham chiếu đầy đủ
+
+Đây là **soft limits** (GitHub không hard-block, sẽ email cảnh báo nếu vượt):
+
+### Pages site
+
+| Giới hạn                   | Mức                              | Ghi chú                                     |
+| -------------------------- | -------------------------------- | ------------------------------------------- |
+| **Site size (published)**  | **≤ 1 GB** recommended           | Soft limit                                  |
+| **File size (per file)**   | **≤ 100 MB**                     | **Hard limit** — file lớn hơn không serve   |
+| **Bandwidth**              | **~100 GB / tháng**              | Soft. Vượt cao: throttle                    |
+| **Builds (Jekyll legacy)** | 10 builds / giờ                  | Không áp với Actions mode                   |
+| **Custom domain**          | 1 CNAME                          | HTTPS auto qua Let's Encrypt                |
+
+### GitHub Actions (nơi workflow chạy)
+
+| Giới hạn                        | Free (public repo)          | Free (private repo)         |
+| ------------------------------- | --------------------------- | --------------------------- |
+| **Minutes Actions / tháng**     | **∞** (unlimited)           | 2,000 phút                  |
+| **Concurrent jobs**             | 20                          | 20                          |
+| **Job timeout**                 | 6 giờ                       | 6 giờ                       |
+| **Artifact storage**            | 500 MB                      | 500 MB                      |
+| **Artifact retention default**  | 90 ngày                     | 90 ngày                     |
+| **Pages artifact retention**    | **1 ngày** (đặc biệt)       | 1 ngày                      |
+| **Max artifact size**           | 10 GB / artifact            | 10 GB / artifact            |
+
+> Public repo → **Actions minutes unlimited**. Build 1 phút × 100 deploy/tháng
+> = không bao giờ lo.
+
+### Khi nào bạn cần lo?
+
+| Dấu hiệu                              | Bạn có cần lo?                           |
+| ------------------------------------- | ---------------------------------------- |
+| Site < 100 MB                         | Không                                    |
+| Site 100 MB – 1 GB                    | Bắt đầu optimize ảnh/font                |
+| Site > 1 GB                           | GitHub có thể email cảnh báo             |
+| File đơn > 100 MB                     | Không serve được → tách / offload        |
+| Bandwidth > 100 GB/tháng              | Cân nhắc Cloudflare proxy trước GH Pages |
+| Build > 10 phút                       | Xem lại toolchain (cache, parallel)      |
+
+---
+
+## 5. URL structure — 3 loại bạn phải biết
+
+Hiểu URL pattern là điều kiện cần để config `BASE_PATH` đúng.
+
+### User site (1 repo / user)
+
+```text
+Repo:  <user>.github.io   (tên repo BẮT BUỘC = username.github.io)
+URL:   https://<user>.github.io/
+base:  /
+```
+
+Ví dụ: repo `octocat/octocat.github.io` → `https://octocat.github.io/`. Mỗi
+GitHub user chỉ có **1** user site.
+
+### Project site (mặc định cho repo thường)
+
+```text
+Repo:  <user>/<anything>
+URL:   https://<user>.github.io/<repo>/
+base:  /<repo>/
+```
+
+Ví dụ: repo `octocat/my-blog` → `https://octocat.github.io/my-blog/`.
+Đây là loại 99% blog/portfolio dùng. **Cần khai báo `base` trong build tool**
+(Astro: `base: '/my-blog'`, Vite: `base: '/my-blog/'`).
+
+### Custom domain
+
+```text
+Thêm:    public/CNAME chứa "example.com"
+DNS:     CNAME example.com → <user>.github.io
+URL:     https://example.com/
+base:    /
+```
+
+Setup ~5 phút, miễn phí (trừ tiền domain ~$12/năm). Tự động HTTPS sau ~1 giờ
+khi GH issue Let's Encrypt cert. **SEO tốt hơn nhiều** so với subpath.
+
+---
+
+## 6. Flow timeline — push tới live
+
+```text
+┌─────────────────────────────────────────────────────┐
+│ T+0s    git push origin main                        │
+├─────────────────────────────────────────────────────┤
+│ T+5s    Workflow trigger (push event)               │
+├─────────────────────────────────────────────────────┤
+│ T+10s   Runner provision (ubuntu-latest)            │
+├─────────────────────────────────────────────────────┤
+│ T+30s   Checkout + setup Node + npm ci (cached)     │
+├─────────────────────────────────────────────────────┤
+│ T+90s   astro build → dist/                         │
+├─────────────────────────────────────────────────────┤
+│ T+100s  upload-pages-artifact (.tar.gz)             │
+├─────────────────────────────────────────────────────┤
+│ T+110s  deploy-pages → Pages CDN                    │
+├─────────────────────────────────────────────────────┤
+│ T+120s  CDN propagate → site live                   │
+└─────────────────────────────────────────────────────┘
+```
+
+Total: ~2 phút từ `git push` → site live. Lần đầu chậm hơn (~3-4 phút) vì
+chưa có cache npm.
+
+---
+
+## 7. Khi nào rời khỏi GH Pages?
+
+GH Pages tuyệt vời cho **static site**. Nhưng có ngưỡng:
+
+| Nếu cần...                            | Migrate sang...                           |
+| ------------------------------------- | ----------------------------------------- |
+| Server-side rendering (SSR)           | Cloudflare Pages, Vercel, Netlify         |
+| Edge functions / API routes           | Cloudflare Pages, Vercel                  |
+| Preview deployment per PR             | Cloudflare Pages, Vercel, Netlify         |
+| Redirect rules phức tạp               | Cloudflare Pages (`_redirects`)           |
+| Custom HTTP headers (CSP, HSTS)       | Cloudflare, Netlify (`_headers`)          |
+| Image optimization runtime            | Vercel, Cloudflare Images                 |
+| Analytics built-in                    | Vercel Analytics, Cloudflare Web Analytics|
+| Password protection                   | Netlify, Cloudflare Access                |
+
+**Cloudflare Pages** là drop-in replacement gần nhất:
+
+- Miễn phí, **bandwidth không giới hạn** (thật sự, không soft limit như GH).
+- Build cùng cách (Node + npm).
+- Preview cho mỗi branch / PR.
+- Cache control aggressive hơn nhiều.
+- DNS + CDN cùng một nơi.
+
+Migrate 1 site Astro từ GH Pages sang Cloudflare Pages thường ~10 phút. Chỉ
+cần đổi `BASE_PATH` về `/` và config build trong CF dashboard.
+
+---
+
+## 8. FAQ
+
+**Q: Build fail thì site bị sao?**
+A: Job `build` fail → job `deploy` không chạy → site cũ vẫn live. Đây chính
+là lý do tách 2 jobs.
+
+**Q: Rollback deploy cũ được không?**
+A: Được. Vào **Settings → Pages** hoặc trigger lại workflow với commit cũ qua
+`workflow_dispatch`. Tab **Environments → github-pages** cũng cho re-deploy
+bản cũ.
+
+**Q: Tốc độ load so với Vercel/Cloudflare?**
+A: GH Pages dùng Fastly CDN — nhanh, nhưng **cache headers ngắn (~10 phút)**
+và **không control được**. CF/Vercel cho tune cache aggressive hơn. Với blog
+< 10k req/tháng thì user không cảm nhận khác biệt.
+
+**Q: HTTPS có auto không?**
+A: Có. Cả GH subdomain và custom domain đều auto Let's Encrypt cert. Vào
+Settings → Pages tick "Enforce HTTPS".
+
+**Q: Password-protect site được không?**
+A: **Không** trên GH Pages free. Cần Netlify/Vercel hoặc Cloudflare Access.
+
+**Q: 404 page custom được không?**
+A: Được. Astro: `src/pages/404.astro` → build ra `dist/404.html` → GH Pages
+tự serve.
+
+**Q: Có analytics built-in không?**
+A: Không. Tự thêm Plausible / Umami / Cloudflare Web Analytics.
+
+**Q: Deploy 2 site khác nhau từ 1 monorepo được không?**
+A: Được, nhưng phức tạp. Mỗi site cần workflow riêng + path filter. Dễ hơn:
+tách 2 repo.
+
+**Q: Có thể deploy từ branch khác `main` không?**
+A: Được. Đổi trigger `on.push.branches: [production]` chẳng hạn. Hoặc
+manual qua `workflow_dispatch`.
+
+---
+
+## 9. Checklist setup mới
+
+Khi setup project mới với GH Pages + Actions:
+
+- [ ] Repo public (free Pages chỉ có ở public, trừ GH Pro/Team)
+- [ ] Workflow file `.github/workflows/deploy-gh-pages.yml`
+- [ ] `permissions: { contents: read, pages: write, id-token: write }`
+- [ ] `concurrency: { group: pages, cancel-in-progress: false }`
+- [ ] 2 jobs tách biệt: `build` + `deploy`
+- [ ] `actions/configure-pages@v5` với `enablement: true`
+- [ ] Set `SITE_URL` + `BASE_PATH` đúng tên repo
+- [ ] Trong Astro/Vite config: `site` + `base` đọc từ env
+- [ ] `public/.nojekyll` để tránh GH chạy Jekyll lên build output
+- [ ] Settings → Pages → Source: GitHub Actions
+- [ ] Test: push thử, kiểm log từng step trong tab Actions
+- [ ] Verify URL live, check 404 page, sitemap, robots.txt
+
+---
+
+## TL;DR
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│  GitHub Pages (Actions mode) — Mental Model                 │
+│                                                             │
+│  Bạn viết:        src/ (Astro source)                       │
+│       │                                                     │
+│       ▼ git push                                            │
+│  GitHub repo:     source code                               │
+│       │                                                     │
+│       ▼ trigger workflow                                    │
+│  Actions runner:  clone + npm ci + build → dist/            │
+│       │                                                     │
+│       ▼ upload-pages-artifact                               │
+│  Artifact store:  dist.tar.gz (TTL 1 ngày)                  │
+│       │                                                     │
+│       ▼ deploy-pages                                        │
+│  Pages CDN:       Fastly edge nodes toàn cầu                │
+│       │                                                     │
+│       ▼ request                                             │
+│  User browser:    https://<user>.github.io/<repo>/          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+- Deploy qua **Actions** = build artifact → Pages CDN, **không** commit branch nào.
+- **3 storage tách biệt**: Git repo / Artifact (1 ngày) / Pages CDN.
+- Limit thực tế: **1 GB site / 100 GB bandwidth/tháng / 100 MB/file**.
+- Public repo → Actions minutes **unlimited**.
+- 99% blog/portfolio dùng **project site** → cần `BASE_PATH`.
+- Khi cần SSR/edge → migrate sang **Cloudflare Pages** (10 phút).
+
+---
+
+## Nguồn tham khảo
+
+- [GitHub Pages — About usage limits](https://docs.github.com/en/pages/getting-started-with-github-pages/about-github-pages#usage-limits)
+- [GitHub Pages — Custom GitHub Actions workflows](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages)
+- [actions/deploy-pages](https://github.com/actions/deploy-pages)
+- [actions/upload-pages-artifact](https://github.com/actions/upload-pages-artifact)
+- [GitHub Actions — Usage limits](https://docs.github.com/en/actions/learn-github-actions/usage-limits-billing-and-administration)
+- [Astro — Deploy to GitHub Pages](https://docs.astro.build/en/guides/deploy/github/)

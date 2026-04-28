@@ -1,0 +1,498 @@
+---
+title: 'Tối ưu External Fonts — Hết Flash, Hết CLS, Hết chờ'
+description: 'Từ font-display, preconnect, preload, self-host, subsetting, variable fonts đến metric-compatible fallback — các kỹ thuật thực chiến giúp loại bỏ FOUT/FOIT và cải thiện LCP/CLS khi dùng webfont bên ngoài.'
+pubDate: 2026-04-29
+tags: [performance, fonts, web-vitals, frontend, css]
+draft: false
+---
+
+Webfont là một trong những render-blocking resource "ngầm" khó chịu nhất: bạn
+không thấy nó trong bundle, nhưng nó trì hoãn **LCP**, gây **CLS**, và tạo
+**FOUT/FOIT** mỗi lần người dùng vào trang. Bài này tổng hợp các kỹ thuật
+mình hay dùng, xếp theo thứ tự từ **rẻ và hiệu quả ngay** đến **kỹ lưỡng và
+mất công hơn**. Áp dụng lần lượt, không nhất thiết phải dùng hết.
+
+---
+
+## 0. Hiểu cách browser load webfont
+
+Trước khi tối ưu, nắm 3 khái niệm cơ bản:
+
+| Khái niệm     | Ý nghĩa                                                     |
+| ------------- | ----------------------------------------------------------- |
+| **FOIT**      | Flash of Invisible Text — text vô hình trong khi chờ font   |
+| **FOUT**      | Flash of Unstyled Text — text hiện fallback rồi mới swap    |
+| **CLS**       | Cumulative Layout Shift khi fallback ↔ webfont khác metric  |
+
+### Pipeline: từ HTML request tới pixel trên màn hình
+
+```text
+   HTML           CSS parse         @font-face          Font          PAINT
+ download   ──►    + CSSOM    ──►   discovered    ──►  download  ──►  text
+    │                │                  │                │              │
+    │                │                  │                │              │
+    ▼                ▼                  ▼                ▼              ▼
+ ─────────────────────────────────────────────────────────────────────────►  t
+                                       ├──── block period ────┤
+                                       │ (text invisible)     │
+                                       │                      ├── swap period ──►
+                                       │                      │ (fallback → webfont)
+```
+
+Điểm chốt: **font chỉ được phát hiện sau khi CSS parse xong** → đó là lý do
+`preconnect` / `preload` có ích (rút ngắn khoảng từ "discovered" → "download
+done" bằng cách bắt đầu sớm hơn).
+
+### Timeline 5 giá trị `font-display`
+
+So sánh trực quan hành vi render theo thời gian (`▓` = text invisible,
+`░` = fallback, `█` = webfont đã load):
+
+```text
+font arrives here ─────────────────────────────▼
+                   0ms    100ms          3s
+                    │      │              │    │
+ block     :       ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓█████████████   FOIT tới 3s
+ swap      :       ▓▓▓▓▓▓▓░░░░░░░░░░░░░░░█████████████   FOUT giữa trang
+ fallback  :       ▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░   sau 3s: dùng fallback hết session
+ optional  :       ▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░   100ms không kịp → fallback cả session
+                          ▲
+                          └─ nếu font về trước 100ms → render webfont luôn, 0 flash
+```
+
+> Property `font-display` quyết định độ dài của 2 giai đoạn này — và là đòn
+> bẩy lớn nhất trong toàn bộ bài viết.
+
+### Khi nào thứ gì gây Web Vitals nào?
+
+```text
+ ┌──────────────────────┐      ┌──────────────────────┐      ┌──────────────────────┐
+ │ Font tải chậm        │      │ Font về sau khi text │      │ Webfont metric khác  │
+ │ + font-display:block │ ───► │ đã render fallback   │ ───► │ fallback (x/y-height)│
+ │                      │      │ + font-display:swap  │      │                      │
+ └──────────┬───────────┘      └──────────┬───────────┘      └──────────┬───────────┘
+            ▼                             ▼                             ▼
+        LCP xấu                       FOUT + CLS                    CLS cao
+      (text invisible                 (chớp font                  (layout jump
+       chặn LCP element)               + reflow)                    khi swap)
+```
+
+Toàn bộ bài viết này là **các kỹ thuật để loại bỏ từng mũi tên trên** —
+từ rút ngắn "font tải chậm" bằng preconnect/preload, tới khử layout jump
+bằng metric override fallback.
+
+---
+
+## 1. Chọn đúng `font-display`
+
+`font-display: swap` là mặc định của Google Fonts và cũng là nguyên nhân
+phổ biến nhất gây FOUT. Bảng so sánh:
+
+| Giá trị    | Block period | Swap period | Khi nào dùng                                              |
+| ---------- | ------------ | ----------- | --------------------------------------------------------- |
+| `auto`     | tuỳ browser  | tuỳ browser | Để browser quyết — thường giống `block`                   |
+| `block`    | ~3s          | ∞           | Logo, branding bắt buộc đúng font, chấp nhận text ẩn      |
+| `swap`     | ~100ms       | ∞           | Muốn text hiện ngay, chấp nhận FOUT                       |
+| `fallback` | ~100ms       | ~3s         | Compromise — sau 3s thì thôi, dùng fallback hết session    |
+| `optional` | ~100ms       | 0           | **Font chỉ là "nice to have"** — không swap giữa chừng    |
+
+Rule of thumb:
+
+- **Body text**: `optional` nếu có fallback tốt (giảm CLS + 0 flash), `swap` nếu font quan trọng về mặt branding.
+- **Heading/Display**: `swap` thường OK vì ít text hơn.
+- **Icon font**: `block` (không thì user thấy ký tự lạ như `□`).
+
+```css
+@font-face {
+  font-family: 'Inter';
+  src: url('/fonts/inter-var.woff2') format('woff2-variations');
+  font-weight: 100 900;
+  font-display: optional;
+}
+```
+
+> `optional` là viên đạn bạc cho hầu hết blog/content site: lần đầu có thể
+> thấy fallback, lần sau (cache rồi) render perfect ngay — không bao giờ
+> flash giữa trang.
+
+---
+
+## 2. Preconnect & DNS-prefetch
+
+Nếu bắt buộc phải dùng CDN bên ngoài (Google Fonts, Typekit, Bunny Fonts...),
+hãy trả lời 3 câu hỏi mạng **trước** khi CSS parse tới `@font-face`:
+
+```html
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="dns-prefetch" href="https://fonts.gstatic.com">
+```
+
+Vì sao cần 2 dòng `preconnect`:
+
+- `fonts.googleapis.com` phục vụ **CSS** (không cần `crossorigin`).
+- `fonts.gstatic.com` phục vụ **file font** — **bắt buộc** `crossorigin`
+  vì webfont luôn request với CORS.
+
+Hiệu quả thực tế: tiết kiệm ~100–300ms trên 3G/4G (DNS + TLS handshake) —
+đủ để font kịp về trong block period của `font-display: optional`.
+
+---
+
+## 3. Preload font chính (critical font)
+
+Preconnect chỉ mở đường. Preload mới là **ra lệnh tải ngay**:
+
+```html
+<link
+  rel="preload"
+  href="/fonts/inter-var.woff2"
+  as="font"
+  type="font/woff2"
+  crossorigin
+>
+```
+
+Nguyên tắc:
+
+- **Chỉ preload 1–2 font file** dùng trong above-the-fold (ví dụ: body
+  regular + heading bold).
+- **Luôn có `crossorigin`** — thiếu sẽ khiến browser tải 2 lần.
+- **Chỉ preload `woff2`** — browser modern đều hỗ trợ, bỏ `woff`.
+- Đặt preload **trước** CSS link để browser bắt đầu tải song song.
+
+Anti-pattern: preload cả 8 file font (regular/italic/bold × 2 subset) —
+browser sẽ tranh băng thông với HTML/CSS và **làm chậm LCP**.
+
+---
+
+## 4. Self-host thay vì CDN bên thứ 3
+
+CDN bên ngoài = thêm 1 origin = thêm DNS + TLS + không share HTTP/2
+connection với site của bạn. Với HTTP/2 multiplexing và HTTP/3, **same-origin
+luôn nhanh hơn cross-origin**.
+
+Self-host với Google Fonts:
+
+```bash
+# fontsource là npm registry mirror chính thức
+pnpm add @fontsource-variable/inter
+```
+
+```ts
+// trong entry CSS
+import '@fontsource-variable/inter';
+```
+
+Lợi ích:
+
+- Cùng origin → share TLS connection với HTML/JS/CSS.
+- Set được `Cache-Control: public, max-age=31536000, immutable`.
+- Không phụ thuộc CDN bên thứ 3 sập/bị chặn (ở VN, Google Fonts thỉnh
+  thoảng chậm).
+- Privacy tốt hơn — không leak IP user sang Google.
+
+> Kiểm tra license trước khi self-host. Font Google OFL thoải mái,
+> font thương mại (Adobe Fonts, FounderType) **không được redistribute**.
+
+---
+
+## 5. Subsetting qua `unicode-range`
+
+Mặc định một file font CJK có thể nặng 5–15MB. Subsetting chia nhỏ và
+browser **chỉ tải subset khi trang có ký tự trong range đó**:
+
+```css
+@font-face {
+  font-family: 'Noto Sans SC';
+  src: url('/fonts/noto-sc-chinese-simplified.woff2') format('woff2');
+  unicode-range: U+4E00-9FFF; /* CJK Unified Ideographs */
+  font-display: optional;
+}
+
+@font-face {
+  font-family: 'Noto Sans SC';
+  src: url('/fonts/noto-sc-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF; /* Basic Latin + Latin-1 Supplement */
+  font-display: optional;
+}
+```
+
+Tool để subset:
+
+- [`glyphhanger`](https://github.com/zachleat/glyphhanger) — phân tích
+  trang thực tế và sinh subset tối thiểu.
+- [`fonttools` `pyftsubset`](https://fonttools.readthedocs.io/) — chính
+  thống, CLI đầy đủ option.
+- Google Fonts CSS API `?subset=latin,vietnamese` — auto subset.
+
+```bash
+pyftsubset NotoSansSC.ttf \
+  --unicodes="U+4E00-9FFF" \
+  --flavor=woff2 \
+  --output-file=noto-sc-cjk.woff2
+```
+
+Gotcha với `unicode-range`: **thứ tự font-family matter**. Browser duyệt
+từng font trong stack, **chỉ download nếu ký tự rơi vào range**. Đặt
+webfont **quan trọng nhất lên đầu** stack.
+
+---
+
+## 6. Variable Fonts — 1 file thay vì 8
+
+Thay vì load `Inter-Regular.woff2` + `Inter-Medium.woff2` + `Inter-Bold.woff2`
++ italic versions = 6 request, dùng **1 file variable** chứa mọi weight:
+
+```css
+@font-face {
+  font-family: 'Inter';
+  src: url('/fonts/inter-var.woff2') format('woff2-variations');
+  font-weight: 100 900;      /* range thay vì single value */
+  font-style: oblique 0deg 10deg;
+  font-display: optional;
+}
+```
+
+Số liệu thực tế từ [Inter](https://rsms.me/inter/):
+
+| Phương pháp           | Số file | Tổng dung lượng |
+| --------------------- | ------- | --------------- |
+| 6 static woff2        | 6       | ~180 KB         |
+| 1 variable woff2      | 1       | ~90 KB          |
+
+Tiết kiệm cả dung lượng **và** số HTTP request — đặc biệt quan trọng trên
+mobile.
+
+---
+
+## 7. Metric-compatible fallback — fix CLS
+
+Đây là kỹ thuật "thầm lặng" nhưng impact lớn nhất lên **CLS**. Ý tưởng:
+tạo một `@font-face` fallback dùng font hệ thống (Arial/Times) nhưng
+**override metric** để khớp với webfont, nhờ đó khi swap **không có
+layout shift**.
+
+```css
+@font-face {
+  font-family: 'Inter Fallback';
+  src: local('Arial');
+  size-adjust: 107%;
+  ascent-override: 90%;
+  descent-override: 22%;
+  line-gap-override: 0%;
+}
+
+body {
+  font-family: 'Inter', 'Inter Fallback', sans-serif;
+}
+```
+
+Tool sinh metric override tự động:
+
+- [Fontsource `--adjust-metrics`](https://fontsource.org/)
+- [`fontpie`](https://github.com/pixel-point/fontpie) — CLI paste Arial/Times
+  metric vào, ra CSS ready-to-use.
+- [Capsize](https://seek-oss.github.io/capsize/) — trực quan hơn, dùng
+  UI để chỉnh.
+
+Đây chính là cách `next/font` làm mặc định và là lý do Next.js có CLS
+gần bằng 0 out-of-the-box.
+
+---
+
+## 8. Font Loading API — gate render khi cần chính xác tuyệt đối
+
+Khi bạn **không** chịu được fallback hiển thị dù là 100ms (logo, hero
+artwork text), dùng CSS Font Loading API:
+
+```html
+<script is:inline>
+  document.documentElement.classList.add('fonts-loading');
+  if ('fonts' in document) {
+    Promise.all([
+      document.fonts.load('1em "Inter"'),
+      document.fonts.load('700 1em "Inter"'),
+    ]).then(() => {
+      document.documentElement.classList.remove('fonts-loading');
+    });
+  } else {
+    document.documentElement.classList.remove('fonts-loading');
+  }
+</script>
+```
+
+```css
+html.fonts-loading .hero-title { visibility: hidden; }
+```
+
+Trade-off:
+
+- Text ẩn tới khi font về → **LCP tệ hơn**.
+- Dùng **chọn lọc** cho element specific (`.hero-title`, không phải cả `body`).
+- Thêm fallback timeout nếu font không về sau 2–3s.
+
+---
+
+## 9. System font stack — zero-cost alternative
+
+Câu hỏi đơn giản: **bạn có thật sự cần custom font?** System UI stack
+ngày nay đẹp, đồng nhất, và **0 byte tải xuống, 0 flash**:
+
+```css
+body {
+  font-family:
+    -apple-system, BlinkMacSystemFont,  /* macOS/iOS */
+    'Segoe UI',                         /* Windows */
+    Roboto,                             /* Android */
+    'Helvetica Neue', Arial, sans-serif;
+}
+
+code, pre {
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    'Liberation Mono', 'Courier New', monospace;
+}
+```
+
+Blog cá nhân, dashboard nội bộ, admin tool — thường không cần custom
+font. GitHub, Stripe docs, và blog của bạn đang đọc (🙂) đều dùng system
+stack.
+
+---
+
+## 10. Tận dụng framework helpers
+
+### Next.js — `next/font`
+
+```tsx
+import { Inter } from 'next/font/google';
+
+const inter = Inter({
+  subsets: ['latin', 'vietnamese'],
+  display: 'optional',
+  variable: '--font-inter',
+});
+
+export default function RootLayout({ children }) {
+  return <html className={inter.variable}>{children}</html>;
+}
+```
+
+Tự động: self-host, preload, metric fallback, CSS-in-CSS.
+
+### Astro — Fonts API (Astro 5.7+)
+
+```ts
+// astro.config.mjs
+import { defineConfig, fontProviders } from 'astro/config';
+
+export default defineConfig({
+  experimental: {
+    fonts: [{
+      provider: fontProviders.google(),
+      name: 'JetBrains Mono',
+      cssVariable: '--font-mono',
+      weights: [400, 700],
+      styles: ['normal'],
+      subsets: ['latin', 'latin-ext'],
+      fallbacks: ['ui-monospace', 'monospace'],
+    }],
+  },
+});
+```
+
+```astro
+---
+import { Font } from 'astro:assets';
+---
+<Font cssVariable="--font-mono" preload />
+```
+
+Astro lo phần tải, cache, preload, và inject CSS tự động.
+
+### Fontsource (bất kỳ framework nào)
+
+```bash
+pnpm add @fontsource-variable/inter
+```
+
+```ts
+import '@fontsource-variable/inter/latin.css';
+```
+
+Đơn giản nhất khi framework chưa có built-in helper.
+
+---
+
+## Đo lường — đừng optimize mù
+
+Trước khi đụng vào code, mở DevTools:
+
+1. **Network tab** → filter `Font` → xem waterfall. Font nào tải chậm?
+   Bao nhiêu file? Tổng bytes?
+2. **Performance tab** → record page load → xem **LCP** có bị webfont
+   block không.
+3. **Lighthouse**:
+   - _"Ensure text remains visible during webfont load"_ → thiếu `font-display`.
+   - _"Preload key requests"_ → thiếu preload font chính.
+   - _"Avoid large layout shifts"_ → thiếu metric fallback.
+4. **`PerformanceObserver`** trực tiếp trong prod:
+
+```ts
+new PerformanceObserver((list) => {
+  for (const entry of list.getEntries()) {
+    if (entry.name.includes('.woff')) {
+      console.log(entry.name, entry.duration);
+    }
+  }
+}).observe({ type: 'resource', buffered: true });
+```
+
+---
+
+## Checklist 1 phút
+
+Apply lần lượt, không cần làm hết:
+
+- [ ] Dùng `font-display: optional` (hoặc `swap`) cho mọi `@font-face`
+- [ ] `<link rel="preconnect" crossorigin>` tới origin font
+- [ ] `<link rel="preload" as="font" crossorigin>` cho font above-the-fold
+- [ ] Self-host qua `@fontsource-*` nếu có thể
+- [ ] Dùng variable font thay vì 4–8 static file
+- [ ] `woff2` only, bỏ `woff`/`ttf`/`eot`
+- [ ] Subset theo `unicode-range` nếu site đa ngôn ngữ (CJK, Cyrillic...)
+- [ ] Metric-compatible fallback để CLS = 0
+- [ ] Xoá font không dùng (kiểm tra bằng Coverage tab)
+- [ ] Cache-Control: `public, max-age=31536000, immutable` cho font file
+
+---
+
+## Tóm tắt
+
+| Kỹ thuật                  | Effort | Impact    | Ưu tiên |
+| ------------------------- | ------ | --------- | ------- |
+| `font-display: optional`  | 5 phút | Cao (flash) | 1      |
+| Preconnect + DNS prefetch | 5 phút | Trung bình | 2      |
+| Preload critical font     | 10 phút| Cao (LCP)  | 3      |
+| Self-host                 | 30 phút| Cao        | 4      |
+| Variable font             | 1h     | Trung bình | 5      |
+| Subsetting                | 1–2h   | Cao với CJK| 6      |
+| Metric fallback           | 30 phút| Cao (CLS)  | 7      |
+| Font Loading API          | 1h     | Thấp       | 8      |
+
+> **Không có viên đạn bạc duy nhất.** Nhưng 3 bước đầu — `font-display: optional`,
+> preconnect, và preload — đã giải quyết ~80% vấn đề cho đa số site.
+> Phần còn lại tuỳ mức độ bạn muốn đuổi theo Core Web Vitals.
+
+---
+
+## Nguồn tham khảo
+
+- [CSS Fonts Module Level 4 — `font-display`](https://drafts.csswg.org/css-fonts-4/#font-display-desc)
+- [web.dev — Avoid invisible text during font loading](https://web.dev/articles/avoid-invisible-text)
+- [web.dev — Optimize WebFont loading](https://web.dev/articles/optimize-webfont-loading)
+- [Fontsource documentation](https://fontsource.org/)
+- [Simon Hearne — Reduce CLS with size-adjust](https://simonhearne.com/2021/layout-shifts-webfonts/)
+- [Next.js — `next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts)
+- [Astro Fonts API](https://docs.astro.build/en/reference/experimental-flags/fonts/)

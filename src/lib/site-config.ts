@@ -8,7 +8,7 @@ export const SITE = {
   /** Handle dạng `owner/repo` — hiển thị trong header kiểu breadcrumb */
   handle: 'jvinhit//lab',
   /** URL production (đổi khi deploy lên domain thật) */
-  url: 'https://jvinhit.dev',
+  url: 'https://jvinhit.github.io/jvinhit-blog',
   /** Mô tả mặc định cho meta + OG */
   description:
     'A frontend engineer and systems architect. This is my digital lab where I document my thoughts on modern web development, performance metrics, and architectural patterns.',

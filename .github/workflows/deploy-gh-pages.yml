@@ -39,6 +39,15 @@ jobs:
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
 
+      # Tự enable Pages lần đầu + expose `steps.pages.outputs.base_path`
+      # để workflow không phụ thuộc vào user bật Pages trong Settings → Pages.
+      # `enablement: true` cần permission `pages: write` (đã khai báo ở trên).
+      - name: Configure Pages
+        id: pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
       - name: Build
         env:
           # Project site URL structure: https://<user>.github.io/<repo>/
