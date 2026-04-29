@@ -81,7 +81,10 @@ const totalPosts = sortedPosts.length;
        * Design:
        * - Markup chứa text đầy đủ → SEO + no-JS đều thấy nội dung.
        * - CSS hide bằng `visibility:hidden` trước khi script chạy (chỉ khi
-       *   `html.js` && không reduced-motion).
+       *   `html.js` && không reduced-motion) — giữ layout, tránh flash content.
+       * - Script đo `offsetHeight` của mỗi target (được giữ nguyên bởi
+       *   `visibility:hidden`) rồi set `min-height` TRƯỚC khi clear content,
+       *   đảm bảo không layout shift / CLS trong lúc gõ từng ký tự.
        * - Script snapshot child structure (giữ <span> styling), clear, rồi
        *   gõ từng char. Cursor hiển thị ở block đang gõ; xong thì stay ở cuối.
        * - Skip toàn bộ animation nếu user prefers-reduced-motion.
@@ -169,8 +172,21 @@ const totalPosts = sortedPosts.length;
         );
         if (targets.length === 0) return;
 
+        // Đo chiều cao tự nhiên TRƯỚC khi clear — `visibility:hidden` giữ
+        // layout nên `offsetHeight` phản ánh đúng kích thước cuối cùng ở
+        // viewport hiện tại. Reserve bằng `min-height` để chữ gõ từng ký tự
+        // không làm page bị nhảy (zero-CLS).
+        const reservedHeights = targets.map((el) => el.offsetHeight);
+
         // Snapshot TRƯỚC khi clear bất cứ element nào.
         const snapshots = targets.map((el) => snapshot(el));
+
+        // Áp dụng min-height ngay sau khi snapshot — giữ box height ổn định
+        // suốt animation. Nếu viewport resize rộng hơn sau này, min-height
+        // vẫn an toàn (content lớn hơn → element tự grow theo).
+        targets.forEach((el, i) => {
+          el.style.minHeight = `${reservedHeights[i]}px`;
+        });
 
         const caret = makeCaret();
 
