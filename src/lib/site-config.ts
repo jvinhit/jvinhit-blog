@@ -22,6 +22,14 @@ export const SITE = {
     title: 'Senior Frontend Engineer',
     email: 'hello@jvinhit.dev',
   },
+  /**
+   * Search engine verification tokens.
+   * Mỗi field render thành 1 `<meta name="..." content="...">` trong <head>.
+   * Bỏ trống / xoá field nếu chưa verify với search engine tương ứng.
+   */
+  verification: {
+    google: 'HK-rhhzRnsZFvbYVG-QDIvBa55wpN6L468CT46-zsjs',
+  },
   /** Social links hiển thị ở footer */
   socials: [
     { label: 'GitHub', href: 'https://github.com/jvinhit', rel: 'me' },
