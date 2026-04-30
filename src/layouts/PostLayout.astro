@@ -16,6 +16,33 @@ const { title, description, pubDate, updatedDate, tags } = post.data;
 ---
 
 <BaseLayout title={title} description={description}>
+  {/*
+    Reading progress bar
+    - `position: fixed` ở top viewport → không gây CLS, không chiếm vertical space.
+    - `hidden` mặc định: ẩn khi no-JS hoặc khi article ngắn hơn viewport
+      (script sẽ remove attribute này khi đo được range > 0).
+    - z-30: dưới mobile drawer (z-40) và search dialog (top layer của <dialog>),
+      trên content thường.
+  */}
+  <div
+    data-reading-progress
+    role="progressbar"
+    aria-valuemin="0"
+    aria-valuemax="100"
+    aria-valuenow="0"
+    aria-label="Reading progress"
+    class="pointer-events-none fixed inset-x-0 top-0 z-30 h-0.5"
+    hidden
+  >
+    <div
+      data-reading-progress-fill
+      aria-hidden="true"
+      class="h-full origin-left bg-[var(--color-accent)] will-change-transform"
+      style="transform: scaleX(0);"
+    >
+    </div>
+  </div>
+
   <Container class="pt-10 pb-16">
     <div class="mx-auto max-w-[1184px]">
       <nav class="mb-6" aria-label="Breadcrumb">
@@ -103,3 +130,122 @@ const { title, description, pubDate, updatedDate, tags } = post.data;
     </div>
   </Container>
 </BaseLayout>
+
+<style>
+  /* Smooth fill giữa 2 rAF frames để bar không "giật" pixel-by-pixel.
+     60ms linear đủ ngắn để cảm giác response trực tiếp với scroll input,
+     không phải auto-motion. Disable hoàn toàn nếu user prefers reduced
+     motion để tuân thủ defensive a11y dù về mặt WCAG SC 2.3.3 (Animation
+     from Interactions) thì progress fill là hợp lệ. */
+  [data-reading-progress-fill] {
+    transition: transform 60ms linear;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    [data-reading-progress-fill] {
+      transition: none;
+    }
+  }
+</style>
+
+<script>
+  /**
+   * Reading progress bar controller
+   *
+   * - Track scope: `.prose-terminal` (chỉ MDX body, không tính breadcrumb /
+   *   article header / footer) → "70% read" phản ánh đúng nội dung user đang
+   *   tiêu thụ.
+   * - Update path: scroll → rAF coalesce → đọc `getBoundingClientRect` 1 lần
+   *   → write `transform: scaleX(...)` + `aria-valuenow`. Không layout thrash
+   *   vì chỉ có 1 read trước 1 write trong cùng frame.
+   * - Re-measure trigger: `resize`, `ResizeObserver` trên article (font/image
+   *   load đổi chiều cao), `load` event (lần cuối khi tất cả async resource
+   *   xong). Range được cache giữa các update để hot path chỉ làm subtraction.
+   * - Hide rule: article ngắn hơn viewport (range ≤ 0) → set `hidden` attr →
+   *   tách khỏi a11y tree, không announce gì cho screen reader.
+   */
+  function init() {
+    const wrapper = document.querySelector<HTMLElement>(
+      '[data-reading-progress]'
+    );
+    const fill = document.querySelector<HTMLElement>(
+      '[data-reading-progress-fill]'
+    );
+    const article = document.querySelector<HTMLElement>('.prose-terminal');
+
+    if (!wrapper || !fill || !article) return;
+
+    let articleStart = 0;
+    let scrollRange = 0;
+    let ticking = false;
+    let lastValueNow = -1;
+
+    function measure() {
+      const rect = article!.getBoundingClientRect();
+      // `top` từ getBoundingClientRect là viewport-relative; cộng scrollY
+      // để chuyển sang document-relative (ổn định khi user đã scroll sẵn
+      // trước khi script chạy).
+      articleStart = rect.top + window.scrollY;
+      const articleEnd = articleStart + article!.offsetHeight;
+      scrollRange = articleEnd - window.innerHeight - articleStart;
+
+      if (scrollRange <= 0) {
+        wrapper!.hidden = true;
+      } else {
+        wrapper!.hidden = false;
+      }
+    }
+
+    function update() {
+      ticking = false;
+      if (scrollRange <= 0) return;
+
+      const ratio = Math.min(
+        1,
+        Math.max(0, (window.scrollY - articleStart) / scrollRange)
+      );
+      fill!.style.transform = `scaleX(${ratio})`;
+
+      // Throttle aria announce: integer 0–100. Screen reader debounce
+      // progressbar updates nhưng tránh setAttribute mỗi frame nếu cùng giá trị.
+      const valueNow = Math.round(ratio * 100);
+      if (valueNow !== lastValueNow) {
+        wrapper!.setAttribute('aria-valuenow', String(valueNow));
+        lastValueNow = valueNow;
+      }
+    }
+
+    function onScroll() {
+      if (ticking) return;
+      ticking = true;
+      requestAnimationFrame(update);
+    }
+
+    function remeasureAndUpdate() {
+      measure();
+      update();
+    }
+
+    measure();
+    update();
+
+    window.addEventListener('scroll', onScroll, { passive: true });
+    window.addEventListener('resize', remeasureAndUpdate, { passive: true });
+
+    // Article kích thước thay đổi vì font swap, lazy image, MDX components
+    // hydrate sau (nếu sau này có) → ResizeObserver bắt mọi case.
+    const ro = new ResizeObserver(remeasureAndUpdate);
+    ro.observe(article);
+
+    // Pass cuối khi tất cả subresource (images, late fonts) đã load —
+    // measurement ổn định hơn lần init đầu.
+    if (document.readyState !== 'complete') {
+      window.addEventListener('load', remeasureAndUpdate, { once: true });
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init, { once: true });
+  } else {
+    init();
+  }
+</script>
