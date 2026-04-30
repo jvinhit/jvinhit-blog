@@ -6,7 +6,12 @@ import ArticleCard from '~/components/blog/ArticleCard.astro';
 import { SITE, withBase } from '~/lib/site-config';
 import { estimateReadingMinutes } from '~/lib/format';
 
-const HOMEPAGE_LIMIT = 5;
+// Số entries hiển thị ban đầu trên homepage. Phần còn lại render kèm
+// nhưng `hidden` — client JS sẽ progressive reveal theo từng batch.
+const HOMEPAGE_INITIAL = 5;
+// Số entries reveal mỗi lần click "Load more". Giữ parity với initial
+// để rhythm cuộn của user nhất quán giữa trước và sau click.
+const LOAD_MORE_BATCH = 5;
 
 const allPosts = await getCollection('posts', ({ data }) =>
   import.meta.env.PROD ? data.draft !== true : true
@@ -17,18 +22,25 @@ const sortedPosts = [...allPosts].sort(
   (a, b) => b.data.pubDate.getTime() - a.data.pubDate.getTime()
 );
 
-// Tính reading time ở build time — nhận plain text từ `render()`
+// Tính reading time ở build time cho TẤT CẢ posts — homepage render full
+// list rồi dùng client JS để reveal dần (SSG không có API endpoint, làm
+// vậy tránh round-trip và giữ trải nghiệm "load more" chỉ trên 1 page).
 const postsWithMeta = await Promise.all(
-  sortedPosts.slice(0, HOMEPAGE_LIMIT).map(async (post) => {
+  sortedPosts.map(async (post, index) => {
     const { remarkPluginFrontmatter } = await render(post);
     const readingMinutes =
       (remarkPluginFrontmatter?.readingMinutes as number | undefined) ??
       estimateReadingMinutes(post.body ?? '');
-    return { post, readingMinutes };
+    return {
+      post,
+      readingMinutes,
+      hidden: index >= HOMEPAGE_INITIAL,
+    };
   })
 );
 
 const totalPosts = sortedPosts.length;
+const hasMore = totalPosts > HOMEPAGE_INITIAL;
 ---
 
 <BaseLayout>
@@ -162,9 +174,7 @@ const totalPosts = sortedPosts.length;
       }
 
       async function run() {
-        const reduced = matchMedia(
-          '(prefers-reduced-motion: reduce)'
-        ).matches;
+        const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
         if (reduced) return;
 
         const targets = Array.from(
@@ -233,9 +243,9 @@ const totalPosts = sortedPosts.length;
             để bắt đầu.
           </p>
         ) : (
-          <ul class="mt-6">
-            {postsWithMeta.map(({ post, readingMinutes }) => (
-              <li>
+          <ul id="latest-logs-list" class="mt-6" data-posts-list>
+            {postsWithMeta.map(({ post, readingMinutes, hidden }) => (
+              <li hidden={hidden} data-post-item>
                 <ArticleCard post={post} readingMinutes={readingMinutes} />
               </li>
             ))}
@@ -244,18 +254,104 @@ const totalPosts = sortedPosts.length;
       }
 
       {
-        totalPosts > HOMEPAGE_LIMIT && (
-          <div class="mt-8 flex justify-center">
-            <a
-              href={withBase('/blog')}
-              class="inline-flex items-center gap-2 rounded-xs border border-[var(--color-border-strong)] px-5 py-2.5 text-xs font-semibold tracking-[0.12em] text-[var(--color-fg)] uppercase transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+        hasMore && (
+          <div class="mt-8 flex justify-center" data-load-more-wrapper>
+            {/*
+              JS-enabled path: button progressive-reveal posts đang ẩn.
+              Render-time render full DOM (SSG-friendly) → click chỉ flip
+              attribute `hidden`, không có network call.
+            */}
+            <button
+              type="button"
+              data-load-more
+              data-batch-size={LOAD_MORE_BATCH}
+              aria-controls="latest-logs-list"
+              class="js-only inline-flex cursor-pointer items-center gap-2 rounded-xs border border-[var(--color-border-strong)] bg-transparent px-5 py-2.5 font-[inherit] text-xs font-semibold tracking-[0.12em] text-[var(--color-fg)] uppercase transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] focus-visible:border-[var(--color-accent)] focus-visible:text-[var(--color-accent)]"
             >
               Load_more_records
+              <span aria-hidden="true">{'>'}</span>
+            </button>
+
+            {/*
+              No-JS fallback: nếu JS không chạy (`html.js` class không
+              được set), button bị ẩn bằng CSS và link archive sẽ hiện
+              ra → user vẫn truy cập được full danh sách qua /blog.
+            */}
+            <a
+              href={withBase('/blog')}
+              class="no-js-only inline-flex items-center gap-2 rounded-xs border border-[var(--color-border-strong)] px-5 py-2.5 text-xs font-semibold tracking-[0.12em] text-[var(--color-fg)] uppercase transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+            >
+              Browse_archive
               <span aria-hidden="true">{'>'}</span>
             </a>
           </div>
         )
       }
     </section>
+
+    <style is:global>
+      /* Toggle giữa interactive button (JS) và link fallback (no-JS).
+         Class `js` được BaseLayout set sync trong <head> → áp dụng trước
+         first paint, không có flash. */
+      html.js .no-js-only {
+        display: none;
+      }
+      html:not(.js) .js-only {
+        display: none;
+      }
+    </style>
+
+    <script>
+      /**
+       * Progressive "Load more" trên homepage
+       *
+       * - SSG nên toàn bộ posts đã có sẵn trong DOM dưới dạng
+       *   `<li data-post-item hidden>`. Click button → bóc attribute
+       *   `hidden` cho batch tiếp theo, không gọi network.
+       * - Sau khi reveal, focus về post đầu tiên của batch → giữ
+       *   keyboard/AT user trong context (browser sẽ tự scroll vào view).
+       * - Khi không còn item nào hidden → ẩn nguyên wrapper.
+       */
+      const wrapper = document.querySelector<HTMLElement>(
+        '[data-load-more-wrapper]'
+      );
+      const button = wrapper?.querySelector<HTMLButtonElement>(
+        '[data-load-more]'
+      );
+      const list = document.querySelector<HTMLElement>('[data-posts-list]');
+
+      if (wrapper && button && list) {
+        const batchSize = Math.max(
+          1,
+          Number(button.dataset.batchSize ?? '5') || 5
+        );
+
+        button.addEventListener('click', () => {
+          const hiddenItems = Array.from(
+            list.querySelectorAll<HTMLLIElement>(
+              '[data-post-item][hidden]'
+            )
+          );
+          const toReveal = hiddenItems.slice(0, batchSize);
+          if (toReveal.length === 0) {
+            wrapper.hidden = true;
+            return;
+          }
+
+          toReveal.forEach((li) => li.removeAttribute('hidden'));
+
+          const firstNewLink =
+            toReveal[0]?.querySelector<HTMLAnchorElement>('a[href]');
+          firstNewLink?.focus();
+
+          const stillHidden = list.querySelector(
+            '[data-post-item][hidden]'
+          );
+          if (!stillHidden) {
+            wrapper.hidden = true;
+          }
+        });
+      }
+    </script>
   </Container>
 </BaseLayout>

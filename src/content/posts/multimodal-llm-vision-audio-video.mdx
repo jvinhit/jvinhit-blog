@@ -1,0 +1,654 @@
+---
+title: 'Multimodal LLM — Cách AI thực sự "thấy" image, "nghe" audio, "xem" video'
+description: 'Bên trong vision-language model (CLIP, ViT, patch tokenization), audio (Whisper, native audio LLM), video (Gemini 2.0+), 3 architecture pattern (early/late/cross fusion), use case practical, và 7 limitation cần biết.'
+pubDate: 2026-04-30
+tags: [ai, multimodal, vision, audio, video, llm, computer-vision]
+draft: false
+---
+
+LLM đời đầu chỉ "đọc" và "viết" text. 2024-2026, mọi frontier model
+đều **multimodal**: GPT-4o nghe + nói + thấy ảnh, Gemini 2.0+ xem
+video native, Claude phân tích screenshot.
+
+Bài này là **practical understanding** cho dev: cách multimodal hoạt
+động bên trong, dùng cho task gì hiệu quả, và đâu là limit.
+
+Không phải research deep dive. Mục tiêu: bạn build app multimodal
+không treat model là "black box".
+
+---
+
+## 1. Tại sao multimodal quan trọng
+
+### 1.1. Thế giới không chỉ là text
+
+Internet = text + image + video + audio. AI chỉ đọc text → bỏ lỡ
+80% thông tin.
+
+Use case unlock với multimodal:
+
+- **Design-to-code**: screenshot Figma → React component
+- **OCR replacement**: extract structured data từ document scan
+- **Accessibility**: describe image cho người khiếm thị
+- **Video analysis**: tóm tắt meeting record, sport highlight
+- **Voice assistant**: latency thấp, conversation natural
+- **Robotics**: visual understanding cho robot navigation
+- **Medical imaging**: X-ray reading, pathology
+
+### 1.2. Convergence với LLM
+
+Trước 2023:
+
+- Text → GPT, BERT
+- Image → ResNet, ViT
+- Audio → Whisper, wav2vec
+- Đều là model riêng biệt
+
+Sau 2023:
+
+- 1 model = text + image + audio + video
+- Cross-modal reasoning (xem ảnh → suy luận text)
+- Unified prompt format
+
+Đây là paradigm shift. AI app stack đơn giản hơn nhiều.
+
+---
+
+## 2. Cơ chế Vision-Language Model (VLM)
+
+### 2.1. Vấn đề: làm sao model text "hiểu" ảnh?
+
+LLM xử lý token (text). Image là pixel grid. Cần **bridge** giữa 2 thế
+giới.
+
+### 2.2. ViT — Vision Transformer
+
+Google 2020 propose: treat image như sequence of patches.
+
+```text
+Image 224x224x3
+    │
+    ▼
+Chia thành patch 16x16 → 14x14 = 196 patch
+    │
+    ▼
+Mỗi patch flatten → vector (16*16*3 = 768 dim)
+    │
+    ▼
+Linear project → patch embedding
+    │
+    ▼
+Add positional embedding
+    │
+    ▼
+Sequence of 196 "image tokens" → Transformer
+```
+
+Output: per-patch embedding. Aggregate (pool) → image-level embedding.
+
+ViT gần như identical với LLM transformer architecture, chỉ khác
+input modality.
+
+### 2.3. CLIP — bridge Vision và Language
+
+OpenAI 2021. Train trên 400M (image, caption) pair.
+
+```text
+                IMAGE                    TEXT
+                  │                       │
+              ViT encoder            Text encoder
+                  │                       │
+                  ▼                       ▼
+               vector_img             vector_text
+                  ↓                       ↓
+              Loss: cùng pair → vectors gần
+                   khác pair → xa
+```
+
+Sau train:
+
+- Image vector và text vector **cùng không gian**.
+- Dot product giữa chúng = "matching score".
+
+→ Foundation cho zero-shot image classification, image search,
+image-text retrieval.
+
+Đọc thêm: [Vector Embeddings — CLIP section](/blog/vector-embeddings-deep-dive).
+
+### 2.4. Modern VLM (LLaVA, GPT-4V, Claude 3.5)
+
+Architecture đơn giản:
+
+```text
+IMAGE → ViT → image features
+                    │
+                    ▼
+              Projection layer (MLP)
+                    │
+                    ▼
+       "image tokens" trong cùng space với text tokens
+                    │
+                    ▼
+              LLM (Llama, Mistral)
+                    │
+                    ▼
+              Text output
+```
+
+Image được "chuyển hóa" thành tokens mà LLM xử lý như text token. LLM
+attention sang image tokens y như attention sang text token.
+
+Train pipeline:
+
+1. **Pre-train projection**: freeze ViT + LLM, train chỉ projection
+   layer trên (image, caption) pair.
+2. **Instruction tuning**: train trên (image, question, answer) data.
+3. **RLHF / DPO** cho alignment.
+
+LLaVA (open source) là implementation tiêu biểu, dễ understand.
+
+### 2.5. Patch density và resolution
+
+Image lớn → nhiều patch → nhiều token → đắt context.
+
+```text
+512x512 → 32x32 = 1024 patch tokens
+1024x1024 → 64x64 = 4096 patch tokens
+```
+
+Trade-off:
+
+- **High res**: thấy detail nhỏ (chữ trong ảnh, fine pattern). Đắt.
+- **Low res**: tổng quan OK, mất detail. Rẻ.
+
+GPT-4V dùng 2 mode: "low detail" (1 token = whole image) và "high
+detail" (split image thành sub-image). Anthropic, Google tương tự.
+
+---
+
+## 3. Audio LLM
+
+### 3.1. Approach 1: ASR + LLM (cascade)
+
+Cũ. Phổ biến trước 2024.
+
+```text
+AUDIO → Whisper (ASR) → text → LLM → text → TTS → AUDIO
+```
+
+**Ưu**: simple, modular.
+**Nhược**:
+
+- Latency cao (3 model sequential)
+- Mất prosody (emotion, tone qua text)
+- Không capture non-verbal (laugh, sigh)
+
+### 3.2. Approach 2: Native audio LLM
+
+GPT-4o (2024), Gemini Live, Moshi (Kyutai).
+
+```text
+AUDIO waveform → audio tokenizer → audio tokens
+                                       │
+                                       ▼
+                                LLM (multimodal)
+                                       │
+                                       ▼
+                              Output: text + audio tokens
+                                       │
+                                       ▼
+                              Audio decoder → waveform
+```
+
+End-to-end. Latency 200-500ms thay vì 2-5s.
+
+### 3.3. Audio tokenization
+
+Khó hơn text tokenization. 2 cách:
+
+**Continuous representation**: encode audio → continuous embedding
+sequence. LLM attend trực tiếp.
+
+**Discrete tokens** (audio "language"): vector quantize audio thành
+codebook tokens (giống text vocabulary). LLM treat như text.
+
+Modern model dùng hybrid hoặc discrete + flow matching cho output.
+
+### 3.4. Use cases practical
+
+- **Voice assistant**: latency thấp, conversation natural
+- **Transcription enhanced**: không chỉ word, cả speaker, emotion
+- **Real-time translation**: speech to speech, giữ tone
+- **Audio content generation**: music, podcast
+- **Accessibility**: describe sound cho người khiếm thính
+
+---
+
+## 4. Video LLM
+
+Hardest modality. Video = sequence of image + audio + temporal
+relationship.
+
+### 4.1. Approach 1: Frame sampling + VLM (cascade)
+
+```text
+Video → sample 1 frame/second → VLM process từng frame → aggregate
+```
+
+OpenAI GPT-4V phiên bản đầu dùng cách này.
+
+**Nhược**: miss event giữa frame, không thật sự "video", chỉ là
+sequence of image.
+
+### 4.2. Approach 2: Native video tokens
+
+Gemini 2.0+ (2024-2025). Process video natively, capture temporal
+relationship.
+
+```text
+Video → 3D temporal-spatial encoder → video tokens
+                                         │
+                                         ▼
+                                Multimodal LLM
+```
+
+Ưu: actual video understanding, motion, temporal reasoning.
+Nhược: token count khủng (1 phút video = 10K-100K token).
+
+### 4.3. Use cases
+
+- **Sport analysis**: highlight extraction, tactic analysis
+- **Meeting summarization**: video conference recording
+- **Surveillance**: anomaly detection, event search
+- **Content moderation**: detect harmful content
+- **Education**: video tutorial Q&A
+
+### 4.4. Limitation hiện tại
+
+- Long video (> 1 hour) vẫn challenging
+- Cost cao (video token số lượng lớn)
+- Real-time video stream chưa mature
+- Spatial reasoning (3D từ 2D video) yếu
+
+---
+
+## 5. 3 Architecture pattern multimodal
+
+### 5.1. Early fusion
+
+Modal được combine ở **input layer**.
+
+```text
+Text tokens   ──┐
+Image tokens  ──┼──► Single Transformer
+Audio tokens  ──┘
+```
+
+**Ưu**: cross-modal interaction từ đầu, mạnh nhất.
+**Nhược**: cần train from scratch, expensive, không reuse được model
+text có sẵn.
+
+### 5.2. Late fusion
+
+Mỗi modal có encoder riêng → combine ở output.
+
+```text
+Text ──► Text encoder ──┐
+Image ──► Vision encoder ──┼──► Combine ──► Decision
+Audio ──► Audio encoder ──┘
+```
+
+**Ưu**: reuse pre-trained encoder, modular.
+**Nhược**: ít cross-modal interaction.
+
+### 5.3. Cross-attention fusion
+
+Most common modern architecture. Encoder riêng cho non-text. LLM
+cross-attend.
+
+```text
+LLM (text) ◄═══cross-attention══► Vision encoder output
+        ▲
+        ▼
+     Text out
+```
+
+**Ưu**: reuse LLM mạnh, vision encoder mạnh, kết hợp linh hoạt.
+**Nhược**: training tinh tế, cần balance.
+
+LLaVA, GPT-4V, Claude 3.5 dùng pattern này (với variations).
+
+---
+
+## 6. Use cases practical cho dev
+
+### 6.1. Design to code (Figma → React)
+
+```python
+# Pseudo
+image = upload_screenshot()
+prompt = """
+Convert this UI design to React component.
+Use Tailwind CSS, TypeScript strict.
+Match exact layout, color, typography.
+"""
+code = vlm.generate(image, prompt)
+```
+
+Cursor hỗ trợ feature này. Quality khá ấn tượng — 70-90% không cần
+sửa cho UI đơn giản.
+
+### 6.2. OCR + structured extraction
+
+Trước: Tesseract → text raw → regex parse → manual structure.
+
+Bây giờ:
+
+```python
+prompt = """
+Extract from this invoice:
+- Vendor name
+- Total amount
+- Line items (description, qty, price)
+
+Return JSON.
+"""
+data = vlm.generate(invoice_image, prompt)
+```
+
+Quality > Tesseract cho document phức tạp. Vẫn cần human review cho
+high-stake.
+
+### 6.3. Image search semantic
+
+```python
+# Index 1M product images với CLIP
+for product in products:
+    embedding = clip.encode_image(product.image)
+    vector_db.insert(product.id, embedding)
+
+# Search "red sneaker for running"
+query_emb = clip.encode_text("red sneaker for running")
+results = vector_db.search(query_emb, k=20)
+```
+
+Thay search "tag" / "category" cũ. Match user intent tốt hơn.
+
+### 6.4. Accessibility — alt text generation
+
+```python
+def generate_alt_text(image_url):
+    return vlm.generate(
+        image=image_url,
+        prompt="Describe this image for screen reader. Be concise."
+    )
+```
+
+Web app tự động generate alt text cho upload.
+
+### 6.5. Code screenshot → text
+
+User paste screenshot bug, terminal error → AI extract:
+
+```python
+prompt = """
+This is a screenshot of code/error. Extract:
+- Code text exactly
+- Error message
+- File names mentioned
+- Line numbers
+"""
+```
+
+Saves user time vs typing manually.
+
+### 6.6. Document Q&A multimodal
+
+PDF với chart + text + table:
+
+```python
+# Sai cách cũ: extract text, lose chart info
+# Đúng cách multimodal:
+
+pages = pdf_to_images(document)
+for page in pages:
+    answer = vlm.generate(page, "Question: revenue growth Q3?")
+```
+
+VLM "thấy" chart, không cần extract sang text.
+
+### 6.7. Real-time visual assistant
+
+GPT-4o + Camera = visual assistant:
+
+```text
+USER: [phone camera điểm vào item]
+"What is this and how do I use it?"
+AI: "This appears to be an espresso machine knob.
+Turn clockwise to set pressure, counter-clockwise for steam..."
+```
+
+Latency 500ms. Use case lớn cho tutorial, accessibility, customer
+support.
+
+---
+
+## 7. 7 Limitation cần biết
+
+### 7.1. Spatial reasoning yếu
+
+Đếm object, vị trí trái/phải, count → multimodal model fail thường
+xuyên.
+
+```text
+Q: "Có bao nhiêu xe ô tô đỏ trong ảnh?"
+A: "3" (thực tế 5)
+
+Q: "Cup nằm bên trái hay phải laptop?"
+A: 50/50 đúng
+```
+
+Mitigation: ask multiple times, average. Hoặc dùng dedicated object
+detection model (YOLO).
+
+### 7.2. Fine detail miss
+
+Text nhỏ, fine pattern, edge case visual:
+
+- Numbers trong table có hàng ngàn dòng → miss
+- Subtle UI element (1px border) → miss
+- Logo nhỏ trong corner → miss
+
+Mitigation: dùng high-detail mode, crop sang sub-image.
+
+### 7.3. Hallucination visual
+
+Model bịa detail không có trong ảnh:
+
+```text
+[Image: empty room]
+Q: "Describe what you see"
+A: "A cozy living room with a brown couch, lamp, and bookshelf..."
+   ← bịa
+```
+
+Mitigation: prompt explicit ("describe ONLY what you see, say
+'unclear' if uncertain"), follow-up verify question.
+
+### 7.4. Compositional understanding
+
+```text
+[Image: red cube on top of blue cube]
+Q: "What's on top of the blue cube?"
+```
+
+Model có thể nhầm relationship. Cải thiện theo thời gian, vẫn không
+perfect.
+
+### 7.5. Reading order trong document
+
+```text
+[Newspaper layout với 3 column]
+Model có thể read left-to-right ngang, lẫn 3 column → text vô nghĩa.
+```
+
+Mitigation: dedicated layout-aware model (Layout-LM, DocLLM) cho
+document structured.
+
+### 7.6. Cost & latency
+
+Image input đắt hơn text nhiều:
+
+```text
+Text input: 1K token = $0.003 (Claude Sonnet)
+Image high-detail: 1 image ≈ 1500-3000 token = $0.005-0.009
+Video 1 minute: 50K-100K token = $0.15-0.30
+```
+
+Latency thêm 1-3s cho VLM call.
+
+### 7.7. Resolution + aspect ratio
+
+Ảnh quá to / aspect ratio bất thường có thể bị resize → mất detail
+hoặc distort.
+
+Mitigation: pre-process trước khi gửi (resize đúng, giữ aspect ratio).
+
+---
+
+## 8. Evaluation challenge
+
+So với text LLM, evaluate VLM khó hơn:
+
+### 8.1. Benchmark phổ biến
+
+- **MMMU**: multimodal university exam
+- **MathVista**: math với visual
+- **DocVQA**: document Q&A
+- **TextVQA**: text trong image
+- **VQAv2**: general visual Q&A
+- **Video-MME**: video benchmark
+
+### 8.2. Sai số đo
+
+- Free-form answer khó automated grading
+- LLM-judge bias
+- Benchmark contamination phổ biến
+
+Production: build eval set riêng cho task của bạn. 100-500 example
+với ground truth, đo accuracy.
+
+---
+
+## 9. Choose model multimodal 2026
+
+| Model                | Strength                             | Note                          |
+| -------------------- | ------------------------------------ | ----------------------------- |
+| GPT-4o               | Audio + image, conversation tự nhiên | Default voice assistant       |
+| Gemini 2.0+          | Video native, long context           | Best video reasoning          |
+| Claude 3.5 Sonnet    | Image, document Q&A, accuracy        | Best for OCR-replacement, doc |
+| Llama 3.2 Vision     | Open, image                          | Self-host vision option       |
+| Pixtral (Mistral)    | Open, vision                         | European data residency       |
+| Qwen2-VL             | Open, image, OCR strong              | Best Chinese OCR              |
+| Whisper (audio only) | ASR                                  | Use cascade khi cần ASR-only  |
+
+### 9.1. Decision tree
+
+```text
+Need video → Gemini 2.0+
+Need real-time audio → GPT-4o
+Need accuracy on document → Claude 3.5 Sonnet
+Need open / self-host → Llama 3.2 Vision / Qwen2-VL
+Just OCR → Tesseract (cheap) + Claude (review)
+```
+
+---
+
+## 10. Practical tips build app
+
+### 10.1. Pre-process image
+
+```python
+def prep_image(img_path):
+    img = Image.open(img_path)
+
+    # Resize giữ aspect (max 2048px chiều dài)
+    img.thumbnail((2048, 2048))
+
+    # Convert sRGB
+    if img.mode != 'RGB':
+        img = img.convert('RGB')
+
+    # JPEG quality 85 (compromise size/quality)
+    buf = BytesIO()
+    img.save(buf, format='JPEG', quality=85)
+
+    return buf.getvalue()
+```
+
+Save bandwidth + cost.
+
+### 10.2. Crop trước khi VLM
+
+Nếu chỉ cần region cụ thể (ví dụ chỉ menu trong screenshot UI), crop
+trước → gửi VLM crop → save tokens.
+
+### 10.3. Combine với traditional CV
+
+VLM mạnh ở understanding, yếu ở counting/measuring. Dùng:
+
+- **YOLO / DETR** cho object detection
+- **OpenCV** cho measuring, color
+- **VLM** cho semantic ("explain what's happening")
+
+Pipeline:
+
+```text
+Image → YOLO → bounding boxes
+       → for each box: crop → VLM describe
+       → aggregate → answer
+```
+
+### 10.4. Cache aggressively
+
+Image embedding stable. Cache CLIP embedding cho image database,
+re-use cho future query.
+
+---
+
+## 11. Tổng kết
+
+Multimodal AI 2026 không phải "novelty" — là **standard**. Mọi
+production AI app sẽ có ít nhất vision support.
+
+5 take-aways:
+
+1. **VLM = ViT + projection + LLM**. Architecture đơn giản hơn bạn
+   nghĩ.
+2. **CLIP là foundation** của image search, zero-shot classification.
+3. **Spatial reasoning vẫn yếu**. Đừng dùng VLM cho counting/measuring.
+4. **Cost cao**: image 5-10x text token, video 50-100x.
+5. **Pre-process + cache** là 2 leverage giảm cost lớn nhất.
+
+Bài tiếp theo logical: build production app dùng tất cả đã học (text +
+vision + RAG + agent + safety).
+
+---
+
+### Đọc thêm
+
+- [Vector Embeddings deep dive](/blog/vector-embeddings-deep-dive) —
+  CLIP detail
+- [LLM Models Comparison](/blog/llm-models-comparison-guide)
+- [RAG Guide](/blog/rag-retrieval-augmented-generation-guide) —
+  multimodal RAG
+- [Cost Optimization](/blog/llm-cost-optimization-patterns)
+- [AI Safety](/blog/ai-safety-alignment-fundamentals)
+
+### Reference
+
+- "An Image is Worth 16x16 Words" (ViT) — Dosovitskiy et al. 2020
+- "Learning Transferable Visual Models" (CLIP) — Radford et al. 2021
+- "Visual Instruction Tuning" (LLaVA) — Liu et al. 2023
+- "GPT-4V System Card" — OpenAI 2023
+- "Gemini: A Family of Highly Capable Multimodal Models"

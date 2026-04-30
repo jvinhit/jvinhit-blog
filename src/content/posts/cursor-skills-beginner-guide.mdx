@@ -1,0 +1,580 @@
+---
+title: 'Cursor Skills — Hướng dẫn toàn tập cho người mới'
+description: 'Skill là gì, khác prompt/rule ra sao, cách viết SKILL.md chuẩn, frontmatter, progressive disclosure, và những sai lầm phổ biến khi lần đầu tạo skill cho Cursor AI agent.'
+pubDate: 2026-04-30
+tags: [cursor, ai-agent, skills, workflow, productivity]
+draft: false
+---
+
+Nếu bạn dùng Cursor mỗi ngày và thấy mình lặp lại một đoạn prompt dài dòng
+kiểu "làm cho tôi theo format này, follow quy tắc A/B/C, dùng template D..." —
+bạn đang cần một **Skill**.
+
+Bài này giải thích từ đầu: Skill là gì, khác Rule và Prompt ở chỗ nào, cách
+viết một `SKILL.md` đúng chuẩn, và những bẫy mà 90% dev mắc phải khi tạo
+skill đầu tiên.
+
+---
+
+## 1. Skill là gì?
+
+**Skill** là một file markdown dạy cho AI agent cách thực hiện một task cụ
+thể. Hình dung đơn giản:
+
+```text
+                        ┌─────────────────────────────┐
+                        │   Cursor AI Agent (bạn)      │
+                        │                             │
+                        │  "Hmm, user đang hỏi về     │
+                        │   review PR. Có skill nào    │
+                        │   liên quan không?"          │
+                        └──────────┬──────────────────┘
+                                   │
+                                   ▼
+                        ┌─────────────────────────────┐
+                        │   ~/.cursor/skills/         │
+                        │   ├─ pr-review/SKILL.md ←── │  "À có rồi!
+                        │   ├─ db-migration/SKILL.md  │   Đọc file này
+                        │   └─ commit-message/        │   và follow theo."
+                        └─────────────────────────────┘
+```
+
+Skill khác prompt thông thường ở chỗ:
+
+- **Bền vững**: viết 1 lần, xài mãi mãi.
+- **Tự kích hoạt**: agent tự quyết định khi nào đọc dựa trên `description`
+  bạn ghi.
+- **Shareable**: commit vào repo, cả team cùng dùng → workflow đồng nhất.
+
+---
+
+## 2. Skill vs Rule vs Prompt — khác nhau chỗ nào?
+
+Ba khái niệm này hay bị lẫn. Bảng so sánh nhanh:
+
+| Thứ        | Khi nào load             | Dung lượng phù hợp   | Dùng cho                                     |
+| ---------- | ------------------------ | -------------------- | -------------------------------------------- |
+| **Prompt** | Mỗi lần gõ chat          | Vài câu              | Câu hỏi 1 lần, không lặp lại                 |
+| **Rule**   | Theo glob hoặc luôn luôn | < 50 dòng            | Coding standard, convention, style guide     |
+| **Skill**  | Khi agent tự detect cần  | < 500 dòng + scripts | Workflow có nhiều bước, domain-specific task |
+
+Nói đơn giản:
+
+- Cần AI **luôn luôn** biết "trong project này dùng tab 2 space, không dùng
+  `any`" → viết **Rule**.
+- Cần AI biết **cách làm một việc phức tạp** từng bước (review PR, migrate
+  database, viết commit message theo format X) → viết **Skill**.
+- Câu hỏi ad-hoc kiểu "refactor hàm này thành async" → cứ **Prompt**.
+
+---
+
+## 3. Anatomy của một Skill
+
+### Cấu trúc thư mục
+
+Skill được lưu ở **một trong hai vị trí**:
+
+```text
+# Personal — xài cho tất cả project của bạn
+~/.cursor/skills/
+  pr-review/
+    SKILL.md                 ← bắt buộc
+    standards.md             ← optional: chi tiết bổ sung
+    examples.md              ← optional: ví dụ dài
+    scripts/
+      lint-check.sh          ← optional: script tiện ích
+
+# Project — commit vào repo, share cho cả team
+<repo>/.cursor/skills/
+  commit-format/
+    SKILL.md
+```
+
+| Vị trí       | Path                     | Scope                      |
+| ------------ | ------------------------ | -------------------------- |
+| **Personal** | `~/.cursor/skills/`      | Chỉ máy bạn, mọi project   |
+| **Project**  | `<repo>/.cursor/skills/` | Cả team dùng chung qua git |
+
+> Đừng bao giờ tạo skill trong `~/.cursor/skills-cursor/` — folder đó dành
+> cho skill built-in của Cursor, bạn đụng vào có thể bị ghi đè khi update.
+
+### Cấu trúc file `SKILL.md`
+
+Mỗi skill chỉ cần **đúng 1 file bắt buộc** là `SKILL.md`:
+
+```markdown
+---
+name: pr-review
+description: Review pull request theo team standards — check security, performance, test coverage. Use when user asks to review a PR, diff, or pasted code change.
+---
+
+# PR Review
+
+## Quick start
+
+1. Đọc diff
+2. Check theo checklist bên dưới
+3. Format feedback theo template
+
+## Review checklist
+
+- [ ] Logic đúng, cover edge case
+- [ ] Không có security hole (SQL injection, XSS)
+- [ ] Test đủ cho thay đổi
+      ...
+```
+
+2 field trong frontmatter **bắt buộc**:
+
+| Field         | Ràng buộc                                   | Mục đích                                        |
+| ------------- | ------------------------------------------- | ----------------------------------------------- |
+| `name`        | ≤ 64 ký tự, chỉ lowercase/số/dấu gạch ngang | ID duy nhất của skill                           |
+| `description` | ≤ 1024 ký tự, không được rỗng               | Agent dùng để **quyết định khi nào load** skill |
+
+---
+
+## 4. Vì sao `description` quan trọng nhất
+
+Đây là thứ agent đọc **trước cả body skill**. Dựa vào nó mà agent quyết định
+"skill này có liên quan đến request của user không?".
+
+Viết description kém → skill không bao giờ được trigger → coi như không tồn
+tại.
+
+### 3 nguyên tắc viết description
+
+**1. Viết ở ngôi thứ ba**, vì description được inject thẳng vào system
+prompt:
+
+```yaml
+# ✅ GOOD
+description: Processes Excel files and generates pivot reports.
+
+# ❌ BAD — "I" là ai? Ai đang nói?
+description: I can help you process Excel files.
+
+# ❌ BAD — "you" cũng không rõ
+description: You can use this to process Excel files.
+```
+
+**2. Gồm cả WHAT và WHEN:**
+
+```yaml
+# ❌ Mơ hồ — agent không biết khi nào dùng
+description: Helps with documents.
+
+# ✅ Cụ thể
+description: Extract text and tables from PDF files, fill forms, merge documents. Use when working with PDF files or when the user mentions PDFs, forms, or document extraction.
+```
+
+**3. Nhét trigger terms** — những từ khóa user có thể dùng khi hỏi:
+
+```yaml
+description: Generate descriptive commit messages by analyzing git diffs. Use when the user asks for help writing commit messages, reviewing staged changes, or mentions "commit".
+```
+
+Agent search keyword trong description → nhiều trigger terms = nhiều khả
+năng được kích hoạt đúng lúc.
+
+---
+
+## 5. Progressive Disclosure — bí kíp giữ skill gọn
+
+Context window là tài nguyên hữu hạn. Mỗi skill được load đều **ăn token**
+của các phần khác (conversation, code, other skills).
+
+**Quy tắc vàng:** SKILL.md nên **< 500 dòng**. Chi tiết dài chuyển sang file
+riêng, chỉ đọc khi agent thực sự cần.
+
+```markdown
+# Skill PDF Processing
+
+## Quick start
+
+Dùng pdfplumber để extract text:
+
+\`\`\`python
+import pdfplumber
+with pdfplumber.open("file.pdf") as pdf:
+text = pdf.pages[0].extract_text()
+\`\`\`
+
+## Additional resources
+
+- API đầy đủ → [reference.md](reference.md)
+- Ví dụ thực tế → [examples.md](examples.md)
+```
+
+Agent chỉ đọc `reference.md` khi task thực sự cần biết API đầy đủ. Task đơn
+giản → chỉ SKILL.md, tiết kiệm cả nghìn token.
+
+**Lưu ý:** reference chỉ nên **1 cấp sâu**. Đừng link `SKILL.md` → `a.md` →
+`b.md` → `c.md`, agent có thể đọc không tới hết.
+
+---
+
+## 6. "Degrees of Freedom" — chọn mức độ chi tiết đúng
+
+Tùy task mà skill nên ở mức **chặt** hay **lỏng**:
+
+| Mức              | Khi dùng                                      | Cách viết             |
+| ---------------- | --------------------------------------------- | --------------------- |
+| **High** (lỏng)  | Task nhiều approach hợp lệ, context-dependent | Hướng dẫn bằng text   |
+| **Medium** (vừa) | Có pattern ưu tiên, nhưng cho phép biến thể   | Pseudocode / template |
+| **Low** (chặt)   | Task dễ sai, cần consistency tuyệt đối        | Script cụ thể để chạy |
+
+Ví dụ:
+
+- **Code review** → High (mỗi lần review khác nhau, AI cần linh hoạt)
+- **Report generation** → Medium (có template nhưng body tùy nội dung)
+- **Database migration** → Low (sai 1 bước là production chết, phải chạy
+  script đã test kỹ)
+
+---
+
+## 7. Các Pattern thông dụng khi viết skill
+
+### Pattern 1: Template Pattern
+
+Dùng khi output có format cố định.
+
+```markdown
+## Report structure
+
+Dùng template sau:
+
+\`\`\`markdown
+
+# [Tiêu đề]
+
+## Executive summary
+
+[1 đoạn tóm tắt key findings]
+
+## Key findings
+
+- Finding 1 + data
+- Finding 2 + data
+
+## Recommendations
+
+1. Action cụ thể
+2. Action cụ thể
+   \`\`\`
+```
+
+### Pattern 2: Examples Pattern
+
+Dùng khi chất lượng output phụ thuộc vào việc thấy ví dụ cụ thể.
+
+```markdown
+## Commit message format
+
+**Ví dụ 1:**
+Input: Added user authentication with JWT tokens
+Output:
+\`\`\`
+feat(auth): implement JWT-based authentication
+
+Add login endpoint and token validation middleware.
+\`\`\`
+
+**Ví dụ 2:**
+Input: Fixed bug where dates displayed incorrectly
+Output:
+\`\`\`
+fix(reports): correct date formatting in timezone conversion
+
+Use UTC timestamps consistently across report generation.
+\`\`\`
+```
+
+### Pattern 3: Workflow Pattern
+
+Dùng cho task nhiều bước. Kèm checklist để agent tự track progress.
+
+```markdown
+## Form filling workflow
+
+Copy checklist này và tick từng bước:
+
+\`\`\`
+
+- [ ] Step 1: Analyze form structure
+- [ ] Step 2: Map fields to data
+- [ ] Step 3: Validate mapping
+- [ ] Step 4: Fill form
+- [ ] Step 5: Verify output
+      \`\`\`
+
+**Step 1: Analyze form**
+Chạy: \`python scripts/analyze_form.py input.pdf\`
+...
+```
+
+### Pattern 4: Conditional Workflow
+
+Dùng khi có nhiều nhánh xử lý.
+
+```markdown
+## Document workflow
+
+1. Xác định loại thao tác:
+   - **Tạo mới?** → Theo "Creation workflow" phía dưới
+   - **Sửa cái có sẵn?** → Theo "Editing workflow" phía dưới
+
+2. Creation workflow:
+   - Dùng docx-js
+   - Build từ scratch
+     ...
+```
+
+### Pattern 5: Feedback Loop
+
+Cho task quality-critical — validate rồi fix rồi validate lại.
+
+```markdown
+## Document editing process
+
+1. Thực hiện edit
+2. **Validate ngay**: \`python scripts/validate.py output/\`
+3. Nếu fail:
+   - Đọc error message
+   - Fix issue
+   - Chạy validate lại
+4. **Chỉ proceed khi validate pass**
+```
+
+---
+
+## 8. Dùng Utility Scripts — khi nào nên
+
+Script ngoài file skill đôi khi tốt hơn code sinh tại chỗ:
+
+- **Ổn định hơn**: code đã test, không phải LLM sinh mỗi lần
+- **Tiết kiệm token**: script không nằm trong context
+- **Consistent**: mỗi lần chạy đều ra cùng kết quả
+
+```markdown
+## Utility scripts
+
+**analyze_form.py** — Extract form fields từ PDF:
+\`\`\`bash
+python scripts/analyze_form.py input.pdf > fields.json
+\`\`\`
+
+**validate.py** — Check errors:
+\`\`\`bash
+python scripts/validate.py fields.json
+
+# Output: "OK" hoặc list conflicts
+
+\`\`\`
+```
+
+Ghi rõ agent nên **execute** (chạy) hay **read** (đọc tham khảo) script đó.
+
+---
+
+## 9. Anti-patterns — những lỗi 90% newbie mắc
+
+### ❌ 1. Windows-style paths
+
+```markdown
+scripts\helper.py # ❌ fail trên Linux/Mac runner
+scripts/helper.py # ✅
+```
+
+### ❌ 2. Quá nhiều lựa chọn
+
+```markdown
+# ❌ BAD
+
+"You can use pypdf, or pdfplumber, or PyMuPDF, or..."
+
+# ✅ GOOD — 1 mặc định + 1 escape hatch
+
+"Use pdfplumber for text extraction.
+For scanned PDFs requiring OCR, use pdf2image + pytesseract instead."
+```
+
+AI không giỏi "chọn giữa 5 option tương đương" — nó sẽ random. Bạn chọn giúp
+nó.
+
+### ❌ 3. Thông tin hết hạn
+
+```markdown
+# ❌ BAD — rồi sẽ lỗi thời
+
+"Nếu bạn dùng trước August 2025, dùng API cũ."
+
+# ✅ GOOD — tách thành section riêng, collapse lại
+
+## Current method
+
+Use v2 API endpoint.
+
+## Legacy patterns (deprecated)
+
+<details>
+<summary>v1 API (removed 2025)</summary>
+...
+</details>
+```
+
+### ❌ 4. Thuật ngữ lung tung
+
+Chọn 1 term và dùng nhất quán:
+
+- ✅ Luôn "API endpoint" — đừng mix "URL", "route", "path"
+- ✅ Luôn "field" — đừng mix "box", "element", "control"
+
+### ❌ 5. Tên skill mơ hồ
+
+```text
+❌ helper, utils, tools, my-skill
+✅ processing-pdfs, analyzing-spreadsheets, review-pull-request
+```
+
+### ❌ 6. Viết như essay
+
+Skill không phải blog post. Mỗi dòng phải **actionable**. Agent đọc thấy
+"PDF là một định dạng file phổ biến chứa text..." → đi lạc khỏi task, tốn
+token vô ích.
+
+---
+
+## 10. Workflow tạo skill lần đầu
+
+Làm theo 4 phase:
+
+### Phase 1 — Discovery
+
+Trả lời được 5 câu:
+
+1. Skill này giải quyết task gì?
+2. Để ở personal (`~/.cursor/skills/`) hay project (`.cursor/skills/`)?
+3. Khi nào agent **nên** load nó? (trigger scenarios)
+4. Có output format đặc biệt không?
+5. Có pattern/example đã có sẵn không?
+
+### Phase 2 — Design
+
+1. Đặt tên: lowercase, gạch ngang, ≤ 64 ký tự
+2. Viết `description`: specific, third-person, có trigger terms
+3. Phác outline các section chính
+4. Quyết định có cần supporting files / scripts không
+
+### Phase 3 — Implementation
+
+1. Tạo thư mục
+2. Viết `SKILL.md` với frontmatter
+3. Tạo reference files nếu cần
+4. Tạo scripts nếu cần
+
+### Phase 4 — Verification
+
+- [ ] SKILL.md ≤ 500 dòng?
+- [ ] Description specific, có trigger terms?
+- [ ] Thuật ngữ nhất quán?
+- [ ] File references chỉ 1 cấp sâu?
+- [ ] Test trigger được skill bằng câu hỏi thật?
+
+---
+
+## 11. Ví dụ hoàn chỉnh — skill `code-review`
+
+```text
+code-review/
+├── SKILL.md
+├── standards.md          # detail standards
+└── examples.md           # ví dụ review thật
+```
+
+**SKILL.md:**
+
+```markdown
+---
+name: code-review
+description: Review code for quality, security, and maintainability following team standards. Use when reviewing pull requests, examining code changes, or when the user asks for a code review.
+---
+
+# Code Review
+
+## Quick Start
+
+Khi review code:
+
+1. Check logic correctness + edge cases
+2. Check security best practices
+3. Đánh giá readability + maintainability
+4. Verify test coverage đủ
+
+## Review Checklist
+
+- [ ] Logic đúng, cover edge cases
+- [ ] Không có vulnerability (SQL injection, XSS, CSRF...)
+- [ ] Follow project style convention
+- [ ] Function size hợp lý, single responsibility
+- [ ] Error handling đầy đủ
+- [ ] Test cover thay đổi
+
+## Format feedback
+
+- **Critical**: Phải fix trước merge
+- **Suggestion**: Nên cân nhắc improve
+- **Nice to have**: Optional enhancement
+
+## Additional Resources
+
+- Coding standards đầy đủ → [standards.md](standards.md)
+- Ví dụ review → [examples.md](examples.md)
+```
+
+---
+
+## 12. Checklist cuối trước khi "ship" skill
+
+**Core quality:**
+
+- [ ] Description specific + có trigger terms
+- [ ] Description gồm cả WHAT và WHEN
+- [ ] Viết ngôi thứ ba
+- [ ] SKILL.md ≤ 500 dòng
+- [ ] Thuật ngữ nhất quán
+- [ ] Example cụ thể, không trừu tượng
+
+**Structure:**
+
+- [ ] File references ≤ 1 cấp sâu
+- [ ] Progressive disclosure đúng chỗ
+- [ ] Workflow có bước rõ ràng
+- [ ] Không có info hết hạn thời gian
+
+**Nếu có script:**
+
+- [ ] Script giải quyết vấn đề, không "punt" sang caller
+- [ ] Ghi rõ package dependency
+- [ ] Error handling tường minh
+- [ ] Không Windows-style paths
+
+---
+
+## Tổng kết
+
+Skill = **domain knowledge + workflow đóng gói** để agent học việc **1 lần**
+và làm việc **chuẩn mãi**.
+
+Cốt lõi là 3 thứ:
+
+1. **Description đỉnh** → skill được trigger đúng lúc
+2. **Body gọn** → tiết kiệm context window
+3. **Progressive disclosure** → detail ở file riêng, chỉ đọc khi cần
+
+Bắt đầu từ một task nhỏ lặp đi lặp lại trong ngày (format commit, review PR
+nội bộ, generate meeting notes...) — viết thử 1 skill cho nó. Xong bạn sẽ
+thấy Cursor "ngoan" hơn hẳn.
+
+Bài tiếp theo trong series sẽ nói về **Sub-agents** — cách delegate task
+nặng sang process con để không nổ context window. Và sau nữa là **Rules** —
+anh em gần với Skill nhưng dùng hoàn toàn khác.

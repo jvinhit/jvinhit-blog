@@ -37,8 +37,10 @@ const ogImageURL = ogImage
 <!doctype html>
 <html lang={SITE.lang}>
   <head>
-    {/* Sync flag để CSS/script biết môi trường client capabilities trước
-     * khi paint đầu tiên — tránh FOUC cho hero typing animation. */}
+    {
+      /* Sync flag để CSS/script biết môi trường client capabilities trước
+       * khi paint đầu tiên — tránh FOUC cho hero typing animation. */
+    }
     <script is:inline>
       (function () {
         var d = document.documentElement;
@@ -60,8 +62,10 @@ const ogImageURL = ogImage
     {noindex && <meta name="robots" content="noindex, nofollow" />}
     <meta name="theme-color" content="#0a0a0a" />
 
-    {/* Search engine ownership verification — tokens lấy từ Search Console
-     * tương ứng. Render only-if-defined để dễ thêm/bớt provider sau này. */}
+    {
+      /* Search engine ownership verification — tokens lấy từ Search Console
+       * tương ứng. Render only-if-defined để dễ thêm/bớt provider sau này. */
+    }
     {
       SITE.verification?.google && (
         <meta

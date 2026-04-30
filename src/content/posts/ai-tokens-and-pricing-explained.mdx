@@ -1,0 +1,503 @@
+---
+title: 'Tokens — Đơn vị tính tiền và đơn vị suy nghĩ của LLM'
+description: 'Token là đơn vị compression, đơn vị suy nghĩ, và đơn vị tính tiền của LLM. Bài đi sâu BPE tokenization, tiếng Việt đắt 2-3x, thinking tokens, và framework chọn subscription vs API.'
+pubDate: 2026-04-30
+tags: [ai, llm, tokens, pricing, cost-optimization, productivity]
+draft: false
+---
+
+Câu hỏi tưởng chừng đơn giản: "tôi hỏi Cursor 1 câu hết bao nhiêu tiền?"
+Muốn trả lời chính xác, bạn phải hiểu **token** — và token không phải
+chỉ là đơn vị pricing. Nó là **đơn vị compression** của ngôn ngữ, là
+**đơn vị bộ nhớ làm việc** của LLM, và (gần đây) là **đơn vị đo suy
+nghĩ** của các reasoning model.
+
+Bài này là deep-dive. Sau khi đọc, bạn sẽ tự tính được cost, tối ưu
+prompt có phương pháp, và chọn đúng giữa subscription vs API.
+
+---
+
+## 1. Vì sao LLM không xử lý trực tiếp ký tự / từ
+
+LLM là mạng neural transformer. Input phải là **số**. Ngôn ngữ tự
+nhiên phải được **encode** thành số trước khi vào model.
+
+2 cách encode đơn giản không dùng được:
+
+- **Character-level**: mỗi ký tự 1 số. Nhược: chuỗi input quá dài (1 đoạn
+  100 ký tự = 100 số → network chậm, khó học dependency xa).
+- **Word-level**: mỗi từ 1 số. Nhược: vocabulary khổng lồ (tiếng Anh ~1
+  triệu từ), từ mới (tên riêng, emoji, slang) → không encode được.
+
+Giải pháp: **subword tokenization**. Chia văn bản thành mảnh lớn hơn
+ký tự, nhỏ hơn từ. Những mảnh này gọi là **token**.
+
+---
+
+## 2. BPE — thuật toán tokenization thực tế
+
+GPT, Claude, Llama... đều dùng biến thể của **Byte Pair Encoding**
+(BPE). Nguyên tắc:
+
+1. Bắt đầu: vocabulary = tất cả ký tự đơn.
+2. Duyệt training corpus, tìm **cặp ký tự xuất hiện nhiều nhất**.
+3. Merge cặp đó thành token mới.
+4. Lặp cho đến khi vocabulary đạt size mong muốn (50K-200K tokens).
+
+Kết quả là vocabulary mà:
+
+- Từ phổ biến (`the`, `of`, `and`) → 1 token.
+- Từ hiếm (`onomatopoeia`) → chia thành token con (`ono`, `mat`, `o`,
+  `poe`, `ia`).
+- Ký tự không thấy bao giờ → fallback về byte-level.
+
+Ví dụ GPT-4 tokenizer (cl100k_base):
+
+```text
+"hello"                → 1 token  [hello]
+"Hello"                → 1 token  [Hello]           (capital khác)
+"hello world"          → 2 tokens [hello, " world"] (space đi với từ sau)
+"unbelievable"         → 2 tokens [unbelie, vable]
+"pneumonoultramicro..."→ nhiều token con
+```
+
+Token **bao gồm space đi trước** nó — `" world"` là 1 token khác với
+`"world"`. Đây là lý do cách bạn format prompt (spacing, newline) ảnh
+hưởng token count.
+
+---
+
+## 3. Tại sao tiếng Việt đắt gấp 2-3 lần tiếng Anh
+
+Training data của các model chủ yếu là **tiếng Anh**. BPE vocabulary
+được tối ưu cho phân phối ký tự tiếng Anh. Tiếng Việt có:
+
+- **Dấu thanh** (á à ả ã ạ...) — ký tự Unicode composite, mỗi chữ có
+  thể là 2-3 byte.
+- **Ít trong training** → BPE không merge chúng thành token dài.
+
+Ví dụ tokenization:
+
+```text
+English:
+"understanding programming"          → 2 tokens
+
+Vietnamese tương đương:
+"hiểu lập trình"                     → ~7 tokens
+  [h, iể, u, " l", ập, " tr", ình]
+```
+
+**Hệ quả tài chính**:
+
+- Viết prompt bằng tiếng Việt → token gấp 2-3x.
+- Pay-per-token → hóa đơn gấp 2-3x.
+- Context window (tính bằng token) → chứa ít hơn 2-3 lần nội dung.
+
+**Chiến lược cho dev Việt:**
+
+| Task                            | Nên viết                                |
+| ------------------------------- | --------------------------------------- |
+| Prompt ngắn, ad-hoc             | Tiếng Việt OK                           |
+| Rule / Skill / System prompt    | **Tiếng Anh** — load mỗi chat, đắt nhất |
+| Doc inline trong code           | Tiếng Anh (code English thống nhất)     |
+| Chat debug với AI               | Tiếng Việt OK (chỉ 1 conversation)      |
+| Content output (docs, bài viết) | Ngôn ngữ đích (trả tiền 1 lần, xài mãi) |
+
+Các model mới (Claude 3.5+, GPT-4o+) tokenizer tốt hơn cho tiếng Việt,
+nhưng chưa bằng tiếng Anh. Khoảng cách giảm nhưng chưa biến mất.
+
+---
+
+## 4. Input vs Output tokens — giá khác nhau có lý do
+
+API LLM tính 2 loại token riêng biệt:
+
+| Loại       | Gồm                                                                             | Giá tương đối |
+| ---------- | ------------------------------------------------------------------------------- | ------------- |
+| **Input**  | System prompt + user message + conversation history + file attach + tool schema | 1x            |
+| **Output** | Text model sinh ra                                                              | 3-5x input    |
+
+### Vì sao output đắt hơn?
+
+2 lý do kỹ thuật:
+
+**1. Compute asymmetry**: Input xử lý 1 lần (parallel pass qua
+transformer). Output sinh **tuần tự** — mỗi token 1 forward pass riêng.
+1000 output tokens = 1000 lần chạy model.
+
+**2. Memory bandwidth**: Output generation ở phase "decode" cần đọc
+toàn bộ KV cache mỗi token → bottleneck memory bandwidth, đắt hardware.
+
+### Ví dụ con số cụ thể
+
+Claude 3.5 Sonnet đầu 2026 (giá ví dụ):
+
+```text
+Input:  $3 / 1M tokens
+Output: $15 / 1M tokens       (5x)
+
+→ Tác vụ A: 10K input, 2K output
+  = 10K × 3 + 2K × 15 = 30 + 30 = 60 cents / 1K calls
+  = $0.06 / request
+
+→ Tác vụ B: 2K input, 10K output
+  = 2K × 3 + 10K × 15 = 6 + 150 = 156 cents / 1K calls
+  = $0.156 / request (2.6x đắt hơn A)
+```
+
+Cùng 12K tokens tổng, B đắt hơn A 2.6x chỉ vì phân bố input/output khác.
+
+**Insight cho dev**: prompt dài 20K để AI output 500 token rẻ hơn prompt
+500 token để AI output 20K. Đừng bắt AI "verbose". Concise = tiết kiệm.
+
+---
+
+## 5. Context window — ngân sách cognitive của conversation
+
+Context window = **tổng token tối đa** (input + output) trong 1 lần gọi
+API.
+
+Dung lượng hiện tại (đầu 2026):
+
+| Model             | Context | Max output |
+| ----------------- | ------- | ---------- |
+| Claude 3.5 Sonnet | 200K    | 8K         |
+| Claude 3.5 Haiku  | 200K    | 8K         |
+| GPT-4o            | 128K    | 16K        |
+| GPT-4o-mini       | 128K    | 16K        |
+| Gemini 2.0 Flash  | 1M      | 8K         |
+| Gemini 2.0 Pro    | 2M      | 8K         |
+| Llama 3.3 70B     | 128K    | 4K         |
+
+Context lớn không có nghĩa là xài hết. Có 2 vấn đề:
+
+### 5.1. "Lost in the middle"
+
+Nghiên cứu (Liu et al. 2023) chỉ ra model **miss thông tin ở giữa
+context dài**. Chính xác ở đầu và cuối; giữa bị nhòe. Nhét 500K token
+vào context không có nghĩa model nhớ hết.
+
+**Chiến lược**: thông tin quan trọng nhất đặt ở **đầu hoặc cuối** prompt.
+Giữa là nơi dễ bị miss.
+
+### 5.2. Cost scaling
+
+Context nhiều → giá tăng:
+
+- Context dài 100K tokens, mỗi câu hỏi user → mỗi lần 100K input token +
+  1K output → ~$0.3 / câu (với $3/1M input).
+- Conversation 20 câu = $6. Đắt nếu bạn chỉ đang trò chuyện thông thường.
+
+Không phải context to là luôn tốt. Dùng vừa phải, chia chat khi đổi chủ
+đề.
+
+---
+
+## 6. Streaming response — vì sao chữ "gõ" ra dần
+
+Bạn thấy ChatGPT/Claude gõ chữ từ từ không phải UI effect. Đây là bản
+chất của autoregressive generation:
+
+```text
+Step 1: input → model → predict token 1 → "Để"
+Step 2: input + "Để" → model → predict token 2 → " giải"
+Step 3: input + "Để giải" → model → predict token 3 → " thích"
+...
+```
+
+Mỗi token cần 1 forward pass riêng. Model **không thể** sinh cả câu 1
+lúc — kiến trúc transformer decoder không cho phép.
+
+### TPS — Tokens Per Second
+
+Đo tốc độ model. Ước lượng:
+
+| Model             | TPS      | 1000 tokens mất |
+| ----------------- | -------- | --------------- |
+| Claude 3.5 Sonnet | 60-80    | ~14s            |
+| GPT-4o            | 80-120   | ~10s            |
+| GPT-4o-mini       | 120-180  | ~7s             |
+| Gemini 2.0 Flash  | 150-250  | ~5s             |
+| Groq Llama 3.3    | 300-500+ | ~3s             |
+
+Với response 2000 tokens, khoảng cách giữa 60 TPS và 200 TPS là 33s
+vs 10s — khác biệt UX đáng kể.
+
+### Lợi ích streaming
+
+1. **First token latency** thấp: thấy output ngay trong 500ms, không
+   phải đợi full response.
+2. **Interrupt được giữa chừng**: thấy AI đi sai hướng → stop, không
+   tốn token output còn lại.
+3. **UX realtime**: chatbot cảm giác "sống" hơn so với loading spinner.
+
+---
+
+## 7. Thinking tokens — chi phí mới của reasoning models
+
+Từ 2024-2025, reasoning models (o1, o3, Claude thinking, DeepSeek-R1)
+mở ra khái niệm mới: **reasoning / thinking tokens**.
+
+### Cơ chế
+
+Model được train để **sinh ra 1 chuỗi reasoning dài** trước khi output
+câu trả lời cuối. Chuỗi này:
+
+- Thường **ẩn với user** (hoặc hiện một phần).
+- **Tính vào output tokens** → bạn trả tiền.
+- Dài gấp 5-50 lần câu trả lời cuối.
+
+Ví dụ task "giải bài toán logic":
+
+```text
+Response "user-facing":      "Đáp án là 42"     (5 tokens)
+Reasoning ẩn phía sau:       [500-5000 tokens của thinking]
+
+Total output billable:       505-5005 tokens
+```
+
+### Economics
+
+Claude 3.7 Sonnet với thinking:
+
+```text
+Input:             $3 / 1M tokens
+Output (normal):   $15 / 1M tokens
+Output (thinking): $15 / 1M tokens   (tính chung)
+
+Budget thinking:   user có thể set max thinking tokens
+                   (ví dụ 10K max thinking per request)
+```
+
+Với o1/o3 của OpenAI, reasoning token giá riêng, thường đắt hơn output
+thường.
+
+### Khi nào dùng thinking
+
+- **Nên dùng**: toán, logic, planning phức tạp, code architecture.
+- **Không cần**: chat thông thường, refactor nhỏ, format đổi syntax.
+
+Thinking model chậm hơn (thêm vài giây → nhiều chục giây) và đắt hơn.
+Chỉ dùng khi **correctness quan trọng hơn speed**.
+
+---
+
+## 8. Sampling parameters — cách model "chọn" token
+
+Model output là **phân phối xác suất** cho mỗi next token. Sampling
+parameter quyết định cách chọn từ phân phối đó:
+
+### Temperature (0 - 2)
+
+Scale độ "sharp" của phân phối.
+
+- **T = 0**: luôn chọn token xác suất cao nhất → deterministic, repetitive.
+- **T = 0.7** (default): cân bằng creative & coherent.
+- **T = 1.5+**: nhiều random, sáng tạo, đôi khi ngớ ngẩn.
+
+Cho code: **T = 0 - 0.3**. Cho creative writing: **T = 0.8 - 1.2**.
+
+### Top-p (nucleus sampling, 0 - 1)
+
+Chỉ sample từ tập hợp token có **cumulative probability ≤ p**.
+
+- **p = 0.1**: chỉ 10% top probability → focused.
+- **p = 0.95** (default): gần như full range, loại bỏ tail.
+- **p = 1.0**: mọi token đều có thể.
+
+### Top-k (1 - vocabulary size)
+
+Chỉ sample từ **k token top xác suất**.
+
+- **k = 1**: greedy, = T=0.
+- **k = 40**: moderate.
+- **k = 500+**: gần như không giới hạn.
+
+### Thực tế
+
+API cấp dev (OpenAI, Anthropic) thường chỉ expose **temperature + top-p**.
+Top-k chỉ có ở local LLM (Llama, qua Ollama / vLLM).
+
+Cho code review, debugging, structured output: **T = 0, top-p = 1** →
+reproducible, không ngẫu nhiên.
+
+Cho brainstorm, naming suggestion: **T = 0.8**.
+
+---
+
+## 9. Prompt caching — tính năng ít dev biết
+
+Nhiều API hỗ trợ cache **prefix prompt** ở server side. Lần sau gọi với
+prefix identical → tính giá rẻ:
+
+| Provider  | Discount cached input |
+| --------- | --------------------- |
+| Anthropic | 90% off               |
+| OpenAI    | 50% off               |
+| Google    | 75% off               |
+
+**Cách tận dụng:**
+
+- Rules / system prompt / docs → đặt ở **đầu prompt**, giữ identical.
+- Phần thay đổi (câu hỏi user) → đặt ở cuối.
+- Cache TTL thường 5-10 phút → chat liên tục, giá giảm rõ rệt.
+
+Cursor, Claude Desktop đều dùng caching ngầm. Bạn không phải config,
+nhưng hiểu cơ chế giúp structure prompt "cache-friendly".
+
+---
+
+## 10. Subscription vs API — framework quyết định
+
+Dev muốn dùng AI có 2 model thanh toán:
+
+### Subscription (Cursor Pro, ChatGPT Plus, Claude Pro)
+
+- **$20/tháng** typical, unlimited usage với limit ẩn (fair-use policy).
+- Provider optimize caching, routing → giá effective thấp.
+- Đổi model dễ (nhiều model trong 1 sub).
+- **Dùng cho**: dev cá nhân, workflow ổn định.
+
+### API direct (Anthropic, OpenAI, OpenRouter)
+
+- Pay-per-token, scale theo use.
+- Control hoàn toàn: model, parameter, tool.
+- Integrate vào app của bạn.
+- **Dùng cho**: production app, heavy user vượt subscription limit, tool
+  riêng.
+
+### Decision framework
+
+| Bạn là                              | Chọn                                                     |
+| ----------------------------------- | -------------------------------------------------------- |
+| Dev solo, dùng Cursor hàng ngày     | Cursor Pro                                               |
+| Team nhỏ, share workflow            | Cursor Business                                          |
+| Build app AI cho user               | API (Anthropic/OpenAI)                                   |
+| Research, cần switch model liên tục | OpenRouter (aggregator)                                  |
+| Production + cost-sensitive         | Mix: cheap model cho phần đơn giản, premium cho phần khó |
+
+### Ước lượng cost cho dev cá nhân
+
+Tôi tracked 1 tuần đều đặn:
+
+```text
+Input tokens/ngày:       ~1.5-2.5M
+Output tokens/ngày:      ~400-600K
+
+Cost raw (Claude Sonnet): ~$10-15/ngày
+× 20 ngày làm việc:      ~$200-300/tháng
+
+Cursor Pro:              $20/tháng
+```
+
+Subscription **rẻ hơn 10-15x** cho dev cá nhân nhờ caching + bulk
+negotiate. Nhưng khi ra ngoài subscription limit, giá overage sẽ gần
+API direct.
+
+---
+
+## 11. 8 kỹ thuật tiết kiệm token thực chiến
+
+### 11.1. Concise prompt
+
+```text
+❌ "Xin chào, làm ơn giúp tôi một chuyện. Tôi muốn refactor..."  (30+ tokens lịch sự)
+✅ "Refactor hàm sau theo 3 rule: ..."                           (~15 tokens)
+```
+
+### 11.2. Limit output explicitly
+
+```text
+"Tên 5 option. Bullet list, 1 dòng/item. KHÔNG giải thích."
+```
+
+### 11.3. Strategic file attach
+
+```text
+❌ @src/       (attach toàn bộ, đốt 100K+)
+✅ @src/features/auth/login.ts
+   @src/features/auth/types.ts   (chỉ file cần)
+```
+
+### 11.4. New chat khi đổi chủ đề
+
+History conversation cũ vẫn trong context → đốt tiền mỗi message. Đổi
+chủ đề → **Start New Chat**.
+
+### 11.5. Rules + Skills thay vì paste lặp
+
+Convention lặp lại → viết [Rule](/blog/cursor-rules-guide). Workflow
+lặp lại → viết [Skill](/blog/cursor-skills-beginner-guide). Load có
+chủ đích, không đốt context mỗi lần.
+
+### 11.6. Delegate heavy read cho sub-agent
+
+[Sub-agent](/blog/cursor-sub-agents-guide) đọc 100KB docs → trả 2KB
+summary. Raw data nằm trong context sub-agent, không leak sang parent.
+
+### 11.7. Chọn model theo task
+
+| Task                           | Model                                |
+| ------------------------------ | ------------------------------------ |
+| Autocomplete                   | Model nhỏ (Haiku, GPT-4o-mini)       |
+| Refactor nhỏ, rename           | Model nhỏ                            |
+| Architecture, plan complex     | Model lớn (Sonnet, GPT-4o, Opus)     |
+| Mathematical / logic reasoning | Thinking model (o1, Claude thinking) |
+| Chat đơn giản                  | Model nhỏ — tiết kiệm 10x            |
+
+### 11.8. Prompt cache-aware format
+
+```text
+[FIXED PROMPT — cache này]
+## Rules
+...
+## Context
+...
+[/FIXED PROMPT]
+
+[VARIABLE — câu hỏi hôm nay]
+Question: ...
+```
+
+Giữ phần trên identical qua nhiều request → hit cache → giảm ~90% giá
+phần cached.
+
+---
+
+## 12. Tổng kết
+
+Token là **DNA kinh tế** của AI. Hiểu token giúp bạn:
+
+1. **Dự báo cost** chính xác hơn "đoán theo số message".
+2. **Viết prompt hiệu quả** — ngắn, structured, cache-friendly.
+3. **Quản lý context** — không để AI quên task giữa chừng.
+4. **Chọn model đúng** — không dùng Claude Opus cho "fix typo".
+5. **Đánh giá subscription vs API** có căn cứ.
+
+5 con số cần nhớ:
+
+- **Output tokens đắt 3-5x input tokens**.
+- **Tiếng Việt = 2-3x token tiếng Anh tương đương**.
+- **Thinking tokens có thể gấp 50x response**.
+- **Context window > 100K mới "lost in middle" rõ**.
+- **Subscription ~ 1/10 giá API direct cho dev cá nhân**.
+
+Token không phải khái niệm vô hình. Mỗi chat là 1 ngân sách đang trôi.
+Dev tiêu tiền AI như tiêu tiền thật — biết chỗ nào đáng, chỗ nào phí.
+
+---
+
+### Đọc thêm
+
+- [AI Hallucination — 6 tầng phòng thủ](/blog/ai-hallucination-and-how-to-spot-it)
+- [Working with Coding Agents](/blog/working-with-coding-agents)
+- [Customizing AI Agents](/blog/customizing-ai-agents)
+- [Cursor Rules](/blog/cursor-rules-guide) — token-efficient convention
+  encoding
+
+### Reference
+
+- [Tiktoken](https://github.com/openai/tiktoken) — tokenizer của OpenAI,
+  dùng để đếm token offline
+- Liu et al. 2023 — "Lost in the Middle" ([arxiv.org/abs/2307.03172](https://arxiv.org/abs/2307.03172))
+- Anthropic blog — Prompt caching documentation

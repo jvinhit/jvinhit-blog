@@ -1,0 +1,621 @@
+---
+title: 'Vector Embeddings — Đi sâu vào "DNA của ý nghĩa" trong LLM'
+description: 'Mổ xẻ embedding từ Word2Vec đến text-embedding-3: hình học của ý nghĩa, distance metrics, evaluation MTEB, visualization (PCA/t-SNE/UMAP), multimodal CLIP, và 6 cạm bẫy practical (anisotropy, drift, dimensionality).'
+pubDate: 2026-04-30
+tags: [ai, embeddings, vector, nlp, machine-learning, rag]
+draft: false
+---
+
+Trong bài [RAG Guide](/blog/rag-retrieval-augmented-generation-guide),
+tôi giới thiệu nhanh về embedding: "text → vector". Bài này đi **sâu
+hơn nhiều** — từ history (Word2Vec 2013) đến state-of-the-art 2026,
+từ geometric intuition đến cạm bẫy production.
+
+Embedding không chỉ là tool cho RAG. Nó là **nền tảng của mọi AI ứng
+dụng modern** — search, recommendation, clustering, anomaly detection,
+zero-shot classification. Hiểu sâu embedding = mở khóa nhiều use case.
+
+---
+
+## 1. Embedding là gì — geometric intuition
+
+**Embedding** = ánh xạ object (text, image, audio) vào không gian
+vector D-chiều (768, 1024, 3072...) sao cho:
+
+> Object có ý nghĩa giống nhau → vector gần nhau.
+> Object có ý nghĩa khác nhau → vector xa nhau.
+
+### 1.1. Ví dụ 2D đơn giản
+
+```text
+                 ▲ y
+                 │
+       "puppy"   │   "kitten"
+       •         │   •
+                 │
+       "dog"     │     "cat"
+       •         │     •
+                 │
+                 ┼─────────────────► x
+                 │
+                 │       "bicycle"
+                 │       •
+                 │
+       "automobile" •
+                 │
+```
+
+Trong không gian 2D này:
+
+- "dog" và "puppy" gần nhau (semantic: chó, độ tuổi khác)
+- "dog" và "cat" gần (cùng pet)
+- "dog" và "bicycle" xa (không liên quan)
+
+Thực tế embedding ở 768-3072 chiều, nhưng intuition tương tự — chỉ là
+high-dimensional.
+
+### 1.2. Vector arithmetic — bí ẩn famous
+
+Word2Vec 2013 phát hiện 1 điều shock cộng đồng:
+
+```text
+embedding("king") - embedding("man") + embedding("woman") ≈ embedding("queen")
+embedding("Paris") - embedding("France") + embedding("Italy") ≈ embedding("Rome")
+embedding("walking") - embedding("walked") + embedding("swimming") ≈ embedding("swam")
+```
+
+Vector arithmetic trên embedding capture được **relationship** giữa
+concept (gender, country-capital, tense). Đây là lý do embedding "magic".
+
+Modern embedding (text-embedding-3, BGE) capture pattern phức tạp hơn
+nhiều — không chỉ gender/tense mà cả tone, sentiment, topic, style.
+
+---
+
+## 2. Lịch sử ngắn: từ Word2Vec đến text-embedding-3
+
+### 2.1. 2013 — Word2Vec (Google)
+
+Mikolov et al., NeurIPS 2013. 2 architecture:
+
+- **CBOW** (Continuous Bag of Words): predict word from context.
+- **Skip-gram**: predict context from word.
+
+```text
+Context: "The cat sat on the ___ mat"
+                              ↑ predict: "soft", "warm", "blue"...
+```
+
+Train trên 100 billion word từ Google News → 300-dim vector cho 3M
+word.
+
+**Limitation**: 1 word = 1 vector, không xử lý được ambiguity. "Bank"
+(ngân hàng) và "bank" (bờ sông) cùng vector.
+
+### 2.2. 2014 — GloVe (Stanford)
+
+GloVe = matrix factorization trên co-occurrence matrix. Khác cách
+build, kết quả tương tự Word2Vec.
+
+### 2.3. 2018 — ELMo, BERT
+
+**Game changer**: contextual embedding. Cùng word trong context khác
+→ vector khác.
+
+- **ELMo** (LSTM-based)
+- **BERT** (Transformer-based)
+
+Lần đầu tiên "bank account" và "river bank" có vector khác nhau.
+
+### 2.4. 2019-2020 — Sentence-BERT
+
+BERT giải mã word, không phải sentence. **Sentence-BERT** (Reimers 2019) fine-tune BERT để output **single vector cho cả câu** —
+optimized cho similarity task.
+
+Đây là moment embedding bùng nổ trong production: search engine,
+chatbot, recommendation đều dùng được.
+
+### 2.5. 2022-2023 — OpenAI ada-002, BGE, E5
+
+Modern era. Train trên data khổng lồ + contrastive learning + LLM-
+generated synthetic data.
+
+- `text-embedding-ada-002` (OpenAI 2022): 1536 dim, default cho 2 năm.
+- `text-embedding-3-large/small` (2024): Matryoshka, multilingual.
+- `bge-large-en-v1.5` (BAAI 2023): top open source.
+
+### 2.6. 2024-2026 — Multilingual + multimodal
+
+- `voyage-3-large`: top benchmark.
+- `gte-Qwen2-7B-instruct`: dùng LLM 7B làm embedding model.
+- `nomic-embed-text-v2-moe`: Mixture of Experts cho embedding.
+- `cohere-embed-v4`: native multilingual + multimodal.
+
+Trend: model ngày càng to (LLM-as-embedding), multilingual quality
+tăng, latency giảm.
+
+---
+
+## 3. Cách embedding model "học"
+
+3 paradigm chính:
+
+### 3.1. Self-supervised (pre-training)
+
+Train predict next word / masked word trên corpus khổng lồ. Side
+effect: hidden state "tự nhiên" capture semantic.
+
+Ví dụ Word2Vec: predict context word → word có context tương tự sẽ
+có vector tương tự.
+
+**Limitation**: không optimize trực tiếp cho similarity. Vector OK
+nhưng chưa tối ưu cho retrieval.
+
+### 3.2. Contrastive learning
+
+Modern approach. Build pairs:
+
+```text
+Positive pair (gần nhau):
+  Query: "How to fix login bug?"
+  Doc: "Step-by-step guide to debug authentication issues"
+
+Negative pair (xa nhau):
+  Query: "How to fix login bug?"
+  Doc: "Recipe for chocolate cake"
+```
+
+Loss function: **InfoNCE**. Khuyến khích positive pair gần, negative
+pair xa.
+
+```text
+Loss = -log( exp(sim(q, d+) / τ) / Σ exp(sim(q, d_i) / τ) )
+```
+
+Trong đó:
+
+- `q`: query embedding
+- `d+`: positive document
+- `d_i`: tất cả negative + positive
+- `τ`: temperature, scaling factor
+
+Hard negative mining quan trọng: chọn negative "khó" (gần positive)
+→ model học biên giới rõ.
+
+### 3.3. LLM-as-encoder (2024+)
+
+Dùng decoder LLM (Llama, Mistral) làm embedding model:
+
+```text
+Input: "How to fix login bug?"
+LLM forward pass → last hidden state → pool → vector
+```
+
+Ưu: capacity rất lớn, capture nuance tốt.
+Nhược: chậm, đắt.
+
+`gte-Qwen2-7B`, `nv-embed-v2` follow pattern này. Top benchmark MTEB
+2025-2026.
+
+---
+
+## 4. Distance metrics
+
+3 cách đo "gần nhau":
+
+### 4.1. Cosine similarity
+
+```text
+cos_sim(A, B) = (A · B) / (|A| × |B|)
+              = Σ(A_i × B_i) / sqrt(Σ A_i²) × sqrt(Σ B_i²)
+```
+
+Range: [-1, +1]. **Most popular** cho text embedding.
+
+Tính chất: scale-invariant. Vector A và 2A có cos_sim = 1.
+
+### 4.2. Dot product
+
+```text
+dot(A, B) = Σ(A_i × B_i)
+```
+
+Tính cả magnitude. Vector dài hơn → score cao hơn (giả sử direction
+giống).
+
+Modern embedding (OpenAI, Cohere) **đã normalize** vector về unit
+length. Khi đó:
+
+- Dot product = cosine similarity
+- Tính dot nhanh hơn cosine (không phải chia magnitude)
+
+→ Production thường dùng dot product với pre-normalized vectors.
+
+### 4.3. Euclidean distance
+
+```text
+euclidean(A, B) = sqrt(Σ (A_i - B_i)²)
+```
+
+"Khoảng cách thẳng". Phù hợp khi magnitude quan trọng.
+
+Ít dùng cho text embedding. Phổ biến hơn cho image embedding.
+
+### 4.4. Khi nào dùng cái nào
+
+| Embedding type                      | Recommend             |
+| ----------------------------------- | --------------------- |
+| OpenAI, Cohere, Voyage (normalized) | Cosine = Dot          |
+| BERT raw (unnormalized)             | Cosine                |
+| Image embedding (CLIP)              | Cosine hoặc Euclidean |
+| Tabular features mixed              | Euclidean             |
+
+Default: **cosine similarity**. An toàn 95% case.
+
+---
+
+## 5. Evaluation — đo embedding tốt đến đâu
+
+### 5.1. MTEB — gold standard benchmark
+
+**Massive Text Embedding Benchmark** (HuggingFace 2022). Đánh giá
+embedding trên 8 task:
+
+1. **Classification** — embed text, train linear classifier
+2. **Clustering** — group similar
+3. **Pair classification** — duplicate detection
+4. **Retrieval** — search relevance
+5. **Reranking** — order candidates
+6. **STS** (Semantic Textual Similarity)
+7. **Summarization** — content alignment
+8. **Bitext mining** — multilingual
+
+Score average qua 50+ dataset → 1 ranking.
+
+Leaderboard: [huggingface.co/spaces/mteb/leaderboard](https://huggingface.co/spaces/mteb/leaderboard).
+Update theo tuần, model mới ra liên tục.
+
+### 5.2. Practical eval cho use case của bạn
+
+MTEB là general. Use case của bạn có thể không match. Build eval set
+riêng:
+
+```jsonl
+{
+  "query": "How to setup auth?",
+  "relevant": [
+    "doc_42",
+    "doc_57"
+  ],
+  "irrelevant": [
+    "doc_1",
+    "doc_99"
+  ]
+}
+```
+
+100-500 query với ground truth → đo:
+
+- **Recall@K**: % query mà ≥1 relevant doc trong top-K
+- **MRR** (Mean Reciprocal Rank): 1/rank của relevant đầu tiên
+- **NDCG**: weight relevance theo position
+
+### 5.3. Pitfall: benchmark contamination
+
+Model train trên data benchmark → score bị inflate. Trends gần đây:
+
+- Use **held-out** benchmark (model không thấy trong train)
+- **MTEB v2** (2025) refresh dataset để chống contamination
+- Build benchmark riêng từ data internal company
+
+---
+
+## 6. Visualization — "thấy" không gian embedding
+
+Embedding 768D không thể plot. Dùng **dimensionality reduction**:
+
+### 6.1. PCA (Principal Component Analysis)
+
+Linear projection. Giữ direction variance lớn nhất.
+
+**Ưu**: nhanh, deterministic, preserve global structure.
+**Nhược**: linear, không capture cluster non-linear.
+
+### 6.2. t-SNE
+
+Non-linear. Ưu tiên preserve **local neighborhood**.
+
+**Ưu**: cluster nhìn rõ, đẹp.
+**Nhược**: chậm O(N²), distance giữa cluster không meaningful, random
+init → kết quả khác nhau mỗi lần.
+
+### 6.3. UMAP — modern default
+
+Cải thiện t-SNE. Preserve cả local + global structure tốt hơn.
+
+**Ưu**: nhanh hơn t-SNE 5-10x, kết quả stable hơn.
+**Nhược**: vẫn random.
+
+```python
+import umap
+import matplotlib.pyplot as plt
+
+reducer = umap.UMAP(n_neighbors=15, min_dist=0.1)
+embedding_2d = reducer.fit_transform(embeddings)  # (N, 2)
+
+plt.scatter(embedding_2d[:, 0], embedding_2d[:, 1], c=labels)
+```
+
+**Cảnh báo**: visualization là indicator, không phải truth. Distance
+trong 2D plot ≠ distance trong 768D thực.
+
+---
+
+## 7. Use cases practical
+
+### 7.1. Semantic search
+
+Đã cover trong [RAG Guide](/blog/rag-retrieval-augmented-generation-guide).
+
+```text
+Query → embed → search vector DB → top-K
+```
+
+### 7.2. Clustering / topic modeling
+
+Embed N document → run K-means / DBSCAN trên vector → discover topic.
+
+```python
+from sklearn.cluster import KMeans
+
+kmeans = KMeans(n_clusters=10)
+clusters = kmeans.fit_predict(embeddings)
+```
+
+Modern alternative: **BERTopic** — kết hợp UMAP + HDBSCAN + LLM
+labeling. Phân cluster + sinh topic name tự động.
+
+### 7.3. Similarity / duplicate detection
+
+Find near-duplicate trong dataset:
+
+```python
+from sklearn.metrics.pairwise import cosine_similarity
+
+sim_matrix = cosine_similarity(embeddings)
+duplicates = np.where(sim_matrix > 0.95)
+```
+
+Use case: dedupe training data, find similar customer queries, plagiarism
+detection.
+
+### 7.4. Zero-shot classification
+
+Cần classifier nhưng không có training data:
+
+```python
+labels = ["spam", "ham", "promotion"]
+label_embeds = embed(labels)
+
+email_embed = embed(email_text)
+predicted = labels[argmax(cosine_sim(email_embed, label_embeds))]
+```
+
+Quick + dirty, không cần fine-tune. Quality 60-80% tùy task.
+
+### 7.5. Recommendation
+
+Item embedding → user history embedding (avg of items) → tìm item
+gần với user vector.
+
+```python
+user_vec = mean([embed(item) for item in user.history])
+recommendations = vector_search(user_vec, k=10)
+```
+
+Pattern Netflix, Spotify dùng (đã optimize hơn nhiều).
+
+### 7.6. Anomaly detection
+
+Embed log entry → cluster. Entry xa mọi cluster = anomaly.
+
+---
+
+## 8. Multimodal embeddings — text + image trong cùng không gian
+
+### 8.1. CLIP (OpenAI 2021)
+
+**Contrastive Language-Image Pre-training**. Train trên 400M cặp
+(image, caption) từ internet.
+
+```text
+Image encoder: ViT (Vision Transformer) → 512-dim vector
+Text encoder: Transformer → 512-dim vector
+
+Train: image và text matching → vector gần nhau
+```
+
+Kết quả: **cùng không gian** cho image + text.
+
+```python
+text = "a photo of a cat"
+image = load_image("cat.jpg")
+
+text_vec = clip.encode_text(text)
+image_vec = clip.encode_image(image)
+
+cosine_sim(text_vec, image_vec) → 0.85  # match
+```
+
+### 8.2. Use cases
+
+- **Text → Image search**: "find photos of red cars" → search image DB
+- **Image → Text search**: image input → tìm text mô tả gần nhất
+- **Zero-shot image classification**: không cần train, chỉ define text
+  label
+- **Image deduplication semantic**: gần giống dù khác orientation
+
+### 8.3. Modern multimodal embeddings
+
+- **OpenCLIP** (open source, scaled)
+- **EVA-CLIP** (improved)
+- **SigLIP** (Google, sigmoid loss)
+- **JinaCLIP**, **Cohere multimodal-v3**: text + image trong cùng API
+
+Trend: native multimodal trong production. Embed image + text + audio
+trong cùng không gian.
+
+---
+
+## 9. 6 cạm bẫy practical
+
+### 9.1. Anisotropy
+
+Embedding pre-trained có thể "tụm về 1 hướng" — vector mọi thứ đều có
+positive correlation với 1 direction chung. Cosine similarity **luôn
+cao** (0.6-0.9) ngay cả unrelated text.
+
+Cause: artifacts của training. Một số token / pattern dominate space.
+
+Fix:
+
+- **Whitening**: trừ mean + decorrelate (PCA whitening)
+- **Use modern embeddings**: BGE, E5, OpenAI v3 đã giảm anisotropy
+- **Re-rank** thay vì trust raw similarity
+
+### 9.2. Embedding drift
+
+Update embedding model → vector cũ và mới khác không gian. RAG store
+embedding cũ → query với embedding mới → mismatch.
+
+Fix:
+
+- Pin model version (ví dụ `text-embedding-3-small-v1`)
+- Re-embed toàn bộ corpus khi đổi model
+- Lưu model version trong metadata mỗi vector
+
+### 9.3. Dimensionality vs cost
+
+Cao chiều = capture nuance, đắt storage + slow search.
+
+Trade-off:
+
+| Dim  | Storage / 1M vectors | Search latency |
+| ---- | -------------------- | -------------- |
+| 384  | 1.5 GB               | Nhanh          |
+| 768  | 3 GB                 | Trung bình     |
+| 1536 | 6 GB                 | Chậm hơn       |
+| 3072 | 12 GB                | Chậm nhất      |
+
+OpenAI v3 hỗ trợ **Matryoshka** — embed 3072 nhưng truncate xuống
+512 lúc query → tradeoff dynamic.
+
+### 9.4. Negative results — không có là không có
+
+Cosine similarity luôn ≥ 0 với normalized vectors → không phân biệt
+được "neutral" vs "irrelevant".
+
+Workaround:
+
+- Thresholding: cos_sim < 0.6 = không relevant
+- Calibrate threshold per task (không có magic number chung)
+- Use rerank với cross-encoder để confirm
+
+### 9.5. Length bias
+
+Embed 1 từ và embed 1000 từ → vector "natural" có magnitude khác. Dù
+normalize, **information density** khác → similarity bị bias.
+
+Fix:
+
+- Chunk consistent length (xem [RAG chunking](/blog/rag-retrieval-augmented-generation-guide))
+- Use embedding model train trên varied length
+
+### 9.6. Out-of-distribution
+
+Embed code khi model train chỉ trên text → vector noise, không
+meaningful.
+
+Fix:
+
+- Use specialized embedding cho code: `text-embedding-3` (good with
+  code), CodeBERT, voyage-code-3
+- Fine-tune embedding trên domain data
+
+---
+
+## 10. Build embedding pipeline production
+
+Checklist:
+
+```text
+PRE-PROCESSING
+☐ Clean text (remove HTML, normalize whitespace)
+☐ Language detection (route theo lang)
+☐ Truncate to model max input
+☐ Deduplicate gần-trùng
+
+EMBEDDING
+☐ Choose model (MTEB + your eval)
+☐ Pin model version
+☐ Batch API call (cost ↓ 50%)
+☐ Retry with exponential backoff
+☐ Store metadata (model, version, timestamp)
+
+STORAGE
+☐ Choose vector DB (xem RAG guide)
+☐ Index built (HNSW / IVF)
+☐ Quantization để save space (binary, scalar)
+☐ Metadata column index (for filter)
+
+SEARCH
+☐ Hybrid (dense + sparse)
+☐ Reranking layer
+☐ Caching (redis cho hot query)
+☐ Latency monitoring
+
+EVAL & UPDATE
+☐ Eval set với ground truth
+☐ Re-evaluate khi đổi model
+☐ Re-embed pipeline cho new docs
+☐ A/B test tweak
+```
+
+---
+
+## 11. Tổng kết
+
+Embedding không phải "set and forget". Nó là core component của AI
+modern, deserve attention sâu.
+
+5 take-aways:
+
+1. **Hiểu geometry**: vector arithmetic, distance metrics — không phải
+   magic.
+2. **Choose right model**: MTEB benchmark + your eval. Khác task khác
+   model.
+3. **Modern matters**: text-embedding-3 / BGE / voyage-3 hơn ada-002
+   nhiều. Đừng dùng model cũ vì "ai cũng biết".
+4. **Watch pitfalls**: anisotropy, drift, dimensionality, length bias.
+5. **Multimodal incoming**: CLIP-style sẽ standard. Chuẩn bị infra.
+
+Embedding là 1 trong những công nghệ "infra" của AI 10 năm tới. Không
+hype như LLM, nhưng underpin hầu hết app practical.
+
+---
+
+### Đọc thêm
+
+- [RAG Guide](/blog/rag-retrieval-augmented-generation-guide) — embedding
+  trong context retrieval
+- [LLM Models Comparison](/blog/llm-models-comparison-guide)
+- [Multimodal LLM](/blog/multimodal-llm-vision-audio-video) — bài tiếp
+- [Tokens & Pricing](/blog/ai-tokens-and-pricing-explained)
+
+### Reference
+
+- Word2Vec — Mikolov et al. 2013
+- Sentence-BERT — Reimers & Gurevych 2019
+- CLIP — Radford et al. 2021 ([arxiv.org/abs/2103.00020](https://arxiv.org/abs/2103.00020))
+- MTEB — Muennighoff et al. 2022 ([arxiv.org/abs/2210.07316](https://arxiv.org/abs/2210.07316))
+- "Anisotropy in Word Embeddings" — Mu & Viswanath 2018

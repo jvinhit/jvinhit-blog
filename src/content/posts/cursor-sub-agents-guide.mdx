@@ -1,0 +1,469 @@
+---
+title: 'Cursor Sub-agents — Delegate task nặng, giữ context window sống sót'
+description: 'Sub-agent là gì, vì sao cần, các loại subagent trong Cursor (generalPurpose, explore, shell...), cách delegate đúng cách, pattern song song vs tuần tự, và những sai lầm làm parent agent "nổ" context.'
+pubDate: 2026-04-30
+tags: [cursor, ai-agent, sub-agents, workflow, context-management]
+draft: false
+---
+
+Bài này là phần 2 của series về Cursor AI Agent, sau bài
+[Cursor Skills cho người mới](/blog/cursor-skills-beginner-guide).
+
+Nếu Skill là "đóng gói workflow", thì **Sub-agent** là "thuê trợ lý để làm
+một phần việc riêng". Khi dùng đúng, 1 task phức tạp có thể chạy trong vài
+phút với context của parent agent vẫn rất gọn. Dùng sai, bạn sẽ đốt token
+gấp đôi mà kết quả vẫn không tốt hơn.
+
+---
+
+## 1. Vấn đề: Context window là tài nguyên khan hiếm
+
+Mọi AI agent đều có **context window** — số token tối đa nó có thể "nhớ" tại
+một thời điểm. Thường dao động 100K - 1M tùy model.
+
+Context window phải chứa:
+
+```text
+┌──────────────────────────────────────────────────┐
+│              Context Window                      │
+├──────────────────────────────────────────────────┤
+│  System prompt         ~ vài nghìn tokens        │
+│  Rules đang active     ~ vài trăm tokens         │
+│  Skills đã load        ~ vài nghìn tokens        │
+│  Lịch sử conversation  ~ hàng chục nghìn tokens  │
+│  File đang mở / đọc    ~ hàng nghìn tokens       │
+│  Tool call results     ~ nhiều tùy tool          │
+│  Output agent đang viết ~ vài nghìn tokens       │
+└──────────────────────────────────────────────────┘
+```
+
+Khi full → agent bắt đầu **quên** những gì ở đầu conversation hoặc phải
+tóm lược lại. Kết quả:
+
+- Không hiểu task ban đầu nữa
+- Lặp lại công việc đã làm
+- Lẫn lộn file đã edit với file chưa edit
+- Cuối cùng trả lời sai hoặc yêu cầu user tóm tắt lại
+
+Task phức tạp kiểu "implement ticket Jira X" thường có:
+
+- Đọc Jira ticket (2-5K tokens)
+- Đọc Confluence spec (10-30K tokens)
+- Phân tích wireframe (5-15K tokens/hình)
+- Explore codebase tìm reference (20-50K tokens)
+- Rồi **mới** bắt đầu code
+
+Chưa kịp code → context đã cạn. Đây là lúc cần **sub-agent**.
+
+---
+
+## 2. Sub-agent là gì?
+
+**Sub-agent** là một agent con, chạy độc lập với context riêng, nhận task
+cụ thể từ parent và trả về **kết quả cô đọng**.
+
+```text
+   ┌───────────────────────────────┐
+   │   Parent Agent                │
+   │   (trò chuyện với user)        │
+   │                               │
+   │   "Tao cần đọc Confluence,    │
+   │    analyze wireframe,          │
+   │    explore codebase..."        │
+   │                               │
+   │   Tao sẽ KHÔNG tự làm.        │
+   │   Thuê sub-agent đi!           │
+   └──────┬────────────────────────┘
+          │ launch Task(...)
+          ▼
+   ┌───────────────────────────────┐
+   │  Sub-agent (context riêng)    │
+   │                               │
+   │  - Đọc Confluence full        │
+   │  - Extract spec                │
+   │  - Screenshot wireframe        │
+   │  - Phân tích 5-questions       │
+   │                               │
+   │  Trả về: SUMMARY (2-3KB)       │
+   └──────┬────────────────────────┘
+          │ return compact summary
+          ▼
+   ┌───────────────────────────────┐
+   │   Parent Agent                │
+   │   Chỉ nhận 2-3KB summary.      │
+   │   Context vẫn gọn → đủ chỗ     │
+   │   để viết plan, code, trao đổi │
+   │   với user.                    │
+   └───────────────────────────────┘
+```
+
+Điểm mấu chốt: **raw data** (full Confluence, full codebase search) nằm
+trong context của sub-agent, **không bao giờ** leak vào parent.
+
+---
+
+## 3. Các loại sub-agent trong Cursor
+
+Cursor cho phép spawn sub-agent qua tool `Task` với tham số `subagent_type`:
+
+| Type               | Quyền                       | Dùng khi                                        |
+| ------------------ | --------------------------- | ----------------------------------------------- |
+| `generalPurpose`   | Full (read/write/shell/MCP) | Task phức tạp nhiều bước, nhiều loại công cụ    |
+| `explore`          | Readonly — chỉ đọc/search   | Tìm code, hiểu codebase, tổng hợp file          |
+| `shell`            | Command execution           | Git ops, npm, build tool, terminal task         |
+| `best-of-n-runner` | Worktree riêng, isolated    | Thử nhiều approach song song, pick cái tốt nhất |
+
+Mỗi loại có **tool set khác nhau**. `explore` không edit được, `shell` chỉ
+chạy command. Chọn đúng loại = tiết kiệm token + giảm risk.
+
+### Ví dụ 1: Dùng `explore` để khảo sát codebase
+
+```text
+User: "Thêm feature notification cho user."
+
+Parent → Task(
+  subagent_type: "explore",
+  description: "Find notification patterns",
+  prompt: "Tìm trong codebase các pattern hiện có liên quan tới:
+    1. Toast/snackbar component — file nào, props gì
+    2. Backend notification service — endpoint nào đã có
+    3. Socket / SSE integration — đã setup ở đâu chưa
+
+    Trả về dạng bullet list, mỗi item kèm file path + line range.
+    Thoroughness: medium."
+)
+```
+
+Sub-agent grep cả chục file, đọc vài nghìn dòng code. Trả về cho parent:
+
+```text
+- Toast: src/ui/Toast.tsx (line 12-45), props { message, type, duration }
+  Đã dùng ở: src/pages/login.tsx, src/pages/settings.tsx
+- Backend endpoint: POST /api/notifications (src/api/notifications.ts:18)
+- Realtime: chưa có SSE/Socket, chỉ có polling mỗi 30s ở
+  src/hooks/useNotifications.ts:45
+```
+
+Parent agent giờ biết chính xác cần đụng vào đâu mà **không phải load** mớ
+code kia vào context của mình.
+
+### Ví dụ 2: Dùng `generalPurpose` gom spec
+
+```text
+Parent → Task(
+  subagent_type: "generalPurpose",
+  description: "Gather Jira spec",
+  prompt: "Đọc Jira ticket PROJ-123 và mọi Confluence link trong đó.
+    KHÔNG trả về raw JSON hay full Confluence text.
+    Trả về đúng format:
+    ## Ticket Summary
+    ...
+    ## Spec Sections
+    ...
+    ## Open Questions
+    ..."
+)
+```
+
+Raw JSON ticket + full Confluence nằm trong context sub-agent (có thể cả
+100K tokens) → parent chỉ nhận 2-3KB summary.
+
+### Ví dụ 3: Dùng `best-of-n-runner` thử nhiều approach
+
+Có task "optimize function X". Không chắc approach A hay B tốt hơn → spawn
+2 sub-agent, mỗi cái thử 1 approach trong worktree riêng, xong compare.
+
+```text
+Parent spawns:
+  ┌─► Sub-agent A: memoize approach, branch "best-of-n/memo"
+  └─► Sub-agent B: web worker approach, branch "best-of-n/worker"
+
+Parent compare benchmark từ 2 branch → pick branch thắng → merge.
+```
+
+---
+
+## 4. Nguyên tắc vàng khi delegate
+
+### 4.1. Parent KHÔNG được nhận raw data
+
+Sai lầm kinh điển:
+
+```text
+❌ BAD — Sub-agent dump raw data
+Prompt: "Đọc Confluence page này và trả về toàn bộ nội dung."
+
+→ Parent nhận 30K tokens HTML của Confluence. Context cạn ngay.
+```
+
+```text
+✅ GOOD — Sub-agent tự summarize
+Prompt: "Đọc Confluence page, trả về summary cô đọng theo format:
+  ## Sections
+  - Tên section — 2-3 bullet behavior chính
+  ## API Specs
+  - Endpoint + schema
+  ## Open Questions
+  - Những gì không rõ"
+```
+
+Luôn yêu cầu **format output cụ thể**. Đừng để agent tự quyết.
+
+### 4.2. Cho sub-agent biết output sẽ đi đâu
+
+Sub-agent viết kết quả **tốt hơn** khi biết downstream là gì:
+
+```text
+✅ GOOD
+"Output của bạn sẽ được planning agent đọc để viết implementation plan.
+ Hãy đầy đủ nhưng cô đọng. Tránh dump raw JSON."
+```
+
+Agent hiểu context → tự chỉnh giọng điệu, độ chi tiết.
+
+### 4.3. Mỗi sub-agent một task đơn
+
+```text
+❌ BAD
+"Sub-agent này vừa đọc ticket Jira, vừa analyze wireframe,
+ vừa explore codebase và viết luôn plan."
+
+✅ GOOD — split ra 3 sub-agent
+  1. "Đọc ticket + Confluence → summary spec"
+  2. "Analyze wireframe → mô tả layout"
+  3. "Explore codebase → reference patterns"
+Parent tổng hợp 3 output, tự viết plan.
+```
+
+Sub-agent "đa năng" thường làm mọi việc ở mức trung bình. Chia nhỏ → mỗi
+sub-agent focus, chất lượng output cao hơn.
+
+### 4.4. Truyền context cần thiết, không hơn
+
+Sub-agent **không biết** conversation trước đó với user. Nó chỉ thấy đúng
+prompt bạn gửi.
+
+```text
+❌ BAD
+Task(prompt: "Làm tiếp như ta đã bàn")
+
+→ Sub-agent: "Cái gì???"
+
+✅ GOOD
+Task(prompt: "User đang implement feature comment.
+  Ticket ID: PROJ-456.
+  Đã confirm dùng pattern ReactQuery thay vì SWR.
+  Task của bạn: explore codebase tìm reference ReactQuery mutations
+  đã có và trả về file path + ví dụ usage.")
+```
+
+Luôn tự hỏi: "Nếu tôi chưa từng gặp user, đọc prompt này có đủ làm task
+không?"
+
+---
+
+## 5. Song song vs Tuần tự
+
+### Song song (parallel)
+
+Khi các task **độc lập**, launch cùng lúc:
+
+```text
+┌─► explore sub-agent A — find component patterns
+├─► explore sub-agent B — find API patterns
+└─► explore sub-agent C — find test patterns
+
+Parent đợi cả 3 xong → tổng hợp.
+```
+
+Lợi: rút wall-clock time đáng kể. Task A/B/C không phụ thuộc nhau → không
+có lý do chạy tuần tự.
+
+Cách call: gọi nhiều `Task(...)` trong **cùng một message**. Hệ thống chạy
+concurrent.
+
+### Tuần tự (sequential)
+
+Khi task B cần output của task A:
+
+```text
+Task 1: "Đọc Jira ticket → get danh sách Confluence link"
+          │
+          ▼
+Task 2: "Đọc các Confluence link sau: [từ output task 1]"
+          │
+          ▼
+Task 3: "Analyze wireframe từ page có image trong output task 2"
+```
+
+Không có cách nào parallel được dây chuyền này — phải đợi nhau.
+
+### Nguyên tắc
+
+**Luôn nghĩ parallel trước.** Chỉ sequential khi thực sự có data
+dependency. Nhiều dev mặc định làm tuần tự vì dễ nghĩ → lãng phí thời gian.
+
+---
+
+## 6. Pattern multi-agent thông dụng
+
+### Pattern 1: Gatherer — Analyzer — Synthesizer
+
+Thường dùng cho task research/implementation có nhiều nguồn dữ liệu.
+
+```text
+                ┌─ Gatherer A ─► (facts)
+Parent ────────┼─ Gatherer B ─► (facts)
+                └─ Gatherer C ─► (facts)
+                        │
+                        ▼
+                 Parent tổng hợp
+                        │
+                        ▼
+                ┌─ Analyzer X ─► (insights)
+                └─ Analyzer Y ─► (insights)
+                        │
+                        ▼
+                Parent synthesize final
+                        │
+                        ▼
+                    User approval
+                        │
+                        ▼
+                  Implementation
+```
+
+### Pattern 2: Scout → Plan → Execute
+
+Task implement feature dài.
+
+```text
+1. Scout (explore sub-agent): hiểu codebase, tìm reference
+2. Plan (parent, có thể switch Plan mode): viết plan từ scout output
+3. Execute (agent mode): implement theo plan, có thể spawn nhỏ hơn cho
+   việc run test/build
+```
+
+### Pattern 3: Validator loop
+
+Cho quality-critical task:
+
+```text
+Parent: implement feature
+  │
+  ▼
+Sub-agent validator: chạy test, check lint, review code
+  │
+  ▼
+Nếu fail → parent fix → validator lần 2
+Nếu pass → done.
+```
+
+Validator là sub-agent riêng vì bạn muốn nó đánh giá **khách quan**, không
+bị lẫn với context của agent đang implement.
+
+---
+
+## 7. Anti-patterns — khi sub-agent phản tác dụng
+
+### ❌ 1. Task quá nhỏ để delegate
+
+```text
+❌ BAD
+Parent → Task(subagent_type: "shell", prompt: "Chạy git status")
+
+→ Spawn agent mới để chạy 1 command = tốn chi phí hơn lợi.
+  Parent cứ tự chạy.
+```
+
+**Rule of thumb**: delegate khi task cần ≥ 3 tool calls hoặc xử lý ≥ 5K
+tokens dữ liệu.
+
+### ❌ 2. Prompt sub-agent quá mơ hồ
+
+```text
+❌ BAD
+prompt: "Tìm hiểu về code authentication"
+
+→ Sub-agent return mớ lộn xộn, parent phải đọc lại và làm lần 2.
+```
+
+Viết prompt như viết ticket cho developer khác: **tasks rõ ràng, format
+output rõ ràng, deliverable rõ ràng**.
+
+### ❌ 3. Sub-agent không biết mục tiêu cuối
+
+```text
+❌ BAD
+prompt: "Đọc Confluence URL này"
+
+→ Sub-agent đọc xong, dump 30K ra. Không biết nên summarize hay không.
+```
+
+Luôn giải thích **why**:
+
+```text
+✅ GOOD
+"Bạn là Spec Gatherer. Output sẽ được planning agent đọc để lên
+ implementation plan. Tóm gọn theo template dưới đây, không dump raw."
+```
+
+### ❌ 4. Dùng sub-agent với user-facing quyết định
+
+```text
+❌ BAD
+Parent → Task(prompt: "Quyết định user có approve PR này không")
+
+→ Sub-agent không nói chuyện với user được. Chỉ parent mới được.
+```
+
+Sub-agent tốt cho **heavy lifting** (đọc nhiều, search nhiều, xử lý nhiều).
+Còn quyết định cần interact với user → parent giữ lại.
+
+### ❌ 5. Không save state giữa các sub-agent
+
+Sub-agent A xong, output chỉ nằm trong message history. Nếu context parent
+quá dài, summary này có thể bị drop.
+
+**Fix**: với task quan trọng, save output của sub-agent vào file, sau đó
+parent đọc lại từ file khi cần. Ví dụ `.specs/PROJ-123.md`.
+
+---
+
+## 8. Khi nào nên dùng sub-agent, khi nào không
+
+**Dùng sub-agent khi:**
+
+- Task cần đọc/xử lý ≥ 5K tokens dữ liệu raw
+- Có thể chạy song song nhiều sub-task độc lập
+- Parent context đã dài, sắp đầy
+- Cần isolation (thử approach mới mà không làm hỏng main)
+- Deliverable là summary, không phải quyết định
+
+**Đừng dùng khi:**
+
+- Task đơn giản, 1-2 tool calls là xong
+- Cần tương tác liên tục với user
+- Task cần state chia sẻ nhiều với parent
+- Deliverable cần tranh luận (user hỏi lại, agent trả lời) → cứ để parent
+
+---
+
+## 9. Tóm tắt
+
+1. Sub-agent tồn tại để **bảo vệ context window** của parent agent.
+2. Parent **không bao giờ** nhận raw data — luôn bắt sub-agent
+   summarize.
+3. Chọn đúng `subagent_type`:
+   - `explore` cho readonly search
+   - `generalPurpose` cho task đa công cụ
+   - `shell` cho command execution
+   - `best-of-n-runner` cho thử nghiệm song song
+4. **Parallel-first**: task độc lập thì spawn cùng lúc.
+5. **Prompt như viết ticket**: rõ task, rõ format, rõ deliverable, kèm
+   context cần thiết.
+6. Save output quan trọng ra file để không mất khi context parent dài.
+
+Bài kế tiếp trong series sẽ nói về **Rules** — nhẹ hơn Skill, luôn hoặc
+auto-attach theo file pattern — dùng cho coding standard và convention
+nhất quán trong cả team.

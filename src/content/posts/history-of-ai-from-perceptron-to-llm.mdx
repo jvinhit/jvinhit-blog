@@ -1,0 +1,443 @@
+---
+title: 'Lịch sử AI — Từ Perceptron 1958 đến Coding Agents 2026'
+description: 'Hành trình 70 năm của AI qua 7 era: symbolic AI, expert systems, statistical learning, deep learning, transformer, LLM, đến reasoning + agentic. Mỗi era có winter và breakthrough — bài học cho dev hôm nay.'
+pubDate: 2026-04-30
+tags: [ai, history, machine-learning, deep-learning, llm, transformer]
+draft: false
+---
+
+Bạn đang dùng Cursor để viết code, ChatGPT để trả lời mọi câu hỏi.
+Cảm giác AI là chuyện vài năm gần đây. Sự thật: **lĩnh vực AI đã 70
+tuổi**. Trước khi LLM "bùng nổ" 2022, đã có 6 era thăng trầm — bao gồm
+2 đợt "winter" gần như giết chết toàn ngành.
+
+Hiểu lịch sử AI quan trọng vì 3 lý do:
+
+1. **Pattern lặp lại** — hype, bubble, winter có thể đến lần nữa.
+2. **Concept tái sinh** — "neural net" 1958, 1986, 2012 là cùng ý tưởng,
+   khác hardware.
+3. **Tránh lặp sai lầm** — symbolic AI thất bại có lý do; LLM cũng
+   có giới hạn tương tự.
+
+Bài này không phải timeline khô khan. Nó là **diễn giải dev-friendly**
+về vì sao AI đến hôm nay theo đúng con đường này.
+
+---
+
+## Era 1 (1950s-1960s): Birth & Symbolic AI
+
+### 1950 — Turing Test
+
+Alan Turing đặt câu hỏi: **"Máy có thể nghĩ không?"** Vì câu hỏi quá
+trừu tượng, ông đề xuất test thực tế: nếu máy chat với người mà người
+không phân biệt được → máy "thông minh".
+
+Note: ChatGPT 2023 đã pass Turing Test phiên bản gốc — sự kiện này
+ít người chú ý.
+
+### 1956 — Dartmouth Workshop
+
+Hội thảo 8 tuần tại Dartmouth College. **John McCarthy** đặt thuật ngữ
+"Artificial Intelligence". Đây là cột mốc khai sinh ngành.
+
+Tham vọng ban đầu: "build a machine that can do any intellectual task
+a human can do" trong **20 năm**. Đã 70 năm vẫn chưa.
+
+### 1958 — Perceptron
+
+Frank Rosenblatt build **Perceptron** — neural network đơn giản nhất
+chỉ có 1 layer. Train được nhận diện hình ảnh đơn giản. Báo NYT viết:
+"electronic computer expected to walk, talk, see, write, reproduce
+itself".
+
+Hype đầu tiên. Phản ứng: hype quá đà.
+
+### 1969 — "Perceptrons" book
+
+Marvin Minsky và Seymour Papert xuất bản sách chứng minh **perceptron
+1 layer không học được hàm XOR**. Ngành neural net **chết đứng**.
+
+Bài học: limitation đơn giản đôi khi giết cả era.
+
+---
+
+## Era 2 (1970s-1980s): Symbolic AI & Expert Systems
+
+Sau "winter" của neural net, ngành chuyển sang **symbolic AI** — biểu
+diễn tri thức bằng logic và rule.
+
+### Expert systems
+
+Các hệ thống "expert system" như **MYCIN** (chẩn đoán bệnh nhiễm
+trùng), **DENDRAL** (phân tích hóa học) hoạt động bằng:
+
+```text
+IF (sốt > 38°C) AND (bạch_cầu > 10000) THEN suspicion = "infection"
+IF suspicion = "infection" AND (gram_stain = positive) THEN ...
+```
+
+Hàng nghìn rule do chuyên gia viết tay. Hoạt động trong domain hẹp,
+nhưng:
+
+- **Knowledge bottleneck**: chuyên gia nói được "tôi đoán" nhưng không
+  formalize thành rule.
+- **Brittleness**: khác domain 1 chút → fail hoàn toàn.
+- **Scaling cost**: thêm rule → conflict + bảo trì khủng khiếp.
+
+### 1980s boom
+
+Nhật Bản đổ $850M vào "Fifth Generation Computer Systems Project".
+Mỹ và châu Âu phản ứng. Hype lên đỉnh.
+
+### Late 1980s — AI Winter 2
+
+Expert systems quá đắt để bảo trì, không scale. Thị trường sụp. Các
+công ty AI phá sản. **Ngành "AI" bị stigma đến mức researcher đổi
+tên** thành "machine learning" để xin tài trợ.
+
+Bài học: technology không kèm scaling path → bubble nổ.
+
+---
+
+## Era 3 (1990s-2000s): Statistical Learning
+
+Symbolic chết, nhưng ngành không chết. Thế hệ mới chuyển sang
+**statistical method** — học từ data, không phải rule do người viết.
+
+### Neural net hồi sinh (limited)
+
+1986: **Backpropagation** được phổ biến (Rumelhart, Hinton, Williams).
+Cho phép train neural net **nhiều layer**. Lý thuyết tốt, nhưng
+hardware 1990s không đủ.
+
+### 1990s — SVM & Decision Trees thống trị
+
+**Support Vector Machine** (Vapnik 1995), **Random Forest** (Breiman 2001) hiệu quả với data size nhỏ-vừa, không cần GPU. Thống trị
+benchmark suốt 15 năm.
+
+### Web 2.0 + Big Data
+
+Cuối 1990s, internet bùng nổ. Dữ liệu trở nên dồi dào. **Data >
+algorithm** trở thành mantra.
+
+### 1997 — Deep Blue đánh bại Kasparov
+
+IBM Deep Blue thắng kỳ thủ cờ vua số 1 thế giới. Truyền thông gọi là
+"AI thắng người". Thực tế: Deep Blue là **brute force search** với
+custom hardware, không phải learning.
+
+Một lần nữa, hype và sự thật khác xa.
+
+### 2006 — "Deep Learning" được đặt tên
+
+Geoffrey Hinton xuất bản paper về **deep belief network** — train
+được neural net 5+ layer. Thuật ngữ "deep learning" lan rộng.
+
+Nhưng thị trường vẫn chưa quan tâm.
+
+---
+
+## Era 4 (2012-2017): Deep Learning Revolution
+
+### 2012 — AlexNet bùng nổ
+
+Cuộc thi **ImageNet** — 1.2 triệu ảnh, 1000 class. Trước 2012, lỗi
+top-5 ~ 25%. Tháng 9/2012, **AlexNet** (Krizhevsky, Sutskever, Hinton)
+đạt **15.3%** — hơn ngạch nhì 10 điểm phần trăm.
+
+3 yếu tố làm nên kỳ tích:
+
+1. **GPU** — train trên 2 GTX 580 thay vì CPU.
+2. **Big data** — ImageNet đủ lớn (1M ảnh).
+3. **CNN architecture** — Convolutional Neural Network của Yann LeCun
+   (1998!) cuối cùng được tận dụng đúng.
+
+Toàn ngành xoay 180°. Mọi research lab chuyển sang deep learning.
+
+### 2014 — GANs
+
+Ian Goodfellow, ý tưởng phát sinh trong quán bar: 2 mạng cạnh nhau,
+1 generate ảnh, 1 phán đoán thật/giả. **Generative Adversarial
+Networks** mở ra generative AI đầu tiên — fake face, deepfake.
+
+### 2015 — ResNet & batch normalization
+
+ResNet (Kaiming He) giải quyết vấn đề "vanishing gradient" cho mạng
+sâu, train được 152 layer. Computer vision đạt ngang/hơn người ở
+ImageNet.
+
+### 2016 — AlphaGo
+
+DeepMind đánh bại Lee Sedol (cờ vây). Cờ vây từng được coi là
+"unsolvable" do số state lớn hơn nguyên tử trong vũ trụ. AlphaGo dùng
+**deep RL + Monte Carlo Tree Search**.
+
+### 2017 — Attention is All You Need
+
+Tháng 6/2017, paper **"Attention is All You Need"** của Google. Giới
+thiệu kiến trúc **Transformer**. Bỏ recurrence (LSTM/RNN) hoàn toàn,
+chỉ dùng cơ chế attention.
+
+Đây là **paper quan trọng nhất 50 năm gần đây** của AI. Mọi LLM hiện
+tại dựa trên Transformer.
+
+---
+
+## Era 5 (2018-2021): The Foundation Model Era
+
+### 2018 — BERT & GPT-1
+
+- **BERT** (Google): Bidirectional encoder, cho task classification,
+  Q&A.
+- **GPT-1** (OpenAI): Decoder-only, tập trung text generation.
+
+Cả hai dùng pattern **pre-train + fine-tune**: train 1 lần trên dữ
+liệu khổng lồ → fine-tune nhỏ cho task riêng.
+
+### 2019 — GPT-2 và "too dangerous to release"
+
+OpenAI delay release GPT-2 vì "lo ngại fake news". Công chúng được
+nhìn thấy giới hạn chất lượng — coherent đoạn vài câu, nhưng vẫn lạc
+chuyện sau.
+
+### 2020 — GPT-3 & Scaling Laws
+
+**GPT-3 (175B parameters)** ra mắt tháng 6/2020. Khả năng:
+
+- Few-shot learning — không cần fine-tune, chỉ cho ví dụ trong prompt.
+- Code generation đơn giản.
+- Translation, summarization, Q&A.
+
+Quan trọng hơn paper: **Scaling Laws for Neural Language Models** của
+Kaplan et al. (2020) — chứng minh \*\*performance scale với data + compute
+
+- parameter\*\* theo công thức power law có thể dự đoán được.
+
+Lần đầu tiên ngành biết: **"to lên thì sẽ giỏi hơn"** — không cần
+breakthrough algorithm.
+
+### 2021 — Codex & GitHub Copilot
+
+OpenAI release **Codex** (GPT-3 fine-tune trên code GitHub). GitHub
+launch **Copilot** tháng 6/2021 — autocomplete bằng AI.
+
+Đây là sản phẩm AI đầu tiên dev xài hàng ngày.
+
+### Tổng kết era 5
+
+Trước GPT-3: AI = task-specific model. Sau GPT-3: AI = **foundation
+model** một model chung, fine-tune/prompt cho task. Paradigm shift.
+
+---
+
+## Era 6 (2022-2023): The ChatGPT Moment
+
+### 30/11/2022 — ChatGPT release
+
+OpenAI launch ChatGPT (GPT-3.5 với RLHF). Thiết kế UI cực kỳ đơn
+giản: 1 ô input, 1 output stream.
+
+Trong **5 ngày** đạt 1 triệu user. **2 tháng** đạt 100 triệu — sản
+phẩm tiêu dùng tăng trưởng nhanh nhất lịch sử.
+
+### Vì sao ChatGPT bùng nổ?
+
+3 yếu tố:
+
+1. **RLHF** (Reinforcement Learning from Human Feedback) — model học
+   "đáp như người mong đợi", không chỉ "predict next token".
+2. **Conversational UI** — giao diện chat ai cũng dùng được, không
+   cần API key.
+3. **Free** — không paywall.
+
+Trước ChatGPT, AI là chuyện researcher + dev. Sau ChatGPT, mọi người
+dùng AI — kể cả bà ngoại bạn.
+
+### 2023 — Năm "everything LLM"
+
+- **GPT-4** (3/2023) — multimodal, đáng tin hơn nhiều.
+- **Claude** (Anthropic) — đối thủ chính.
+- **LLaMA** (Meta, 2/2023) — leak version, sau đó release chính thức
+  → mở đường open-source LLM.
+- **Mistral, Falcon, Yi, Qwen...** — vô số model open source.
+- **LangChain, LlamaIndex** boom — framework để build AI app.
+- **Vector database** — Pinecone, Weaviate, Chroma trở nên phổ biến.
+
+Hype lên đỉnh điểm. Mọi startup gắn "AI" vào pitch deck.
+
+---
+
+## Era 7 (2024-2026): Reasoning & Agentic AI
+
+### 2024 — Reasoning models
+
+Đầu 2024, ngành nhận ra giới hạn của "scale parameters". Phép màu của
+GPT-3 → GPT-4 không lặp lại với GPT-5 đơn thuần scale.
+
+Hướng mới: **scale "thinking" thay vì scale parameter**.
+
+- **OpenAI o1** (9/2024) — reasoning model đầu tiên, train để sinh
+  chain-of-thought dài trước khi output.
+- **Claude 3.5 Sonnet (thinking)** — Anthropic release thinking mode.
+- **DeepSeek-R1** (12/2024) — open source reasoning, gây sốc cộng đồng.
+
+Reasoning model có thể giải Olympiad math, code competitive programming
+ở mức Codeforces 2200+ — mức Grandmaster.
+
+Đổi lại: chậm hơn 10-50x, đắt hơn 5-50x. Không phải task nào cũng cần.
+
+### 2024-2025 — Agentic AI
+
+Đầu 2024: Cursor, Devin (Cognition), GitHub Copilot Workspace, Claude
+Computer Use. Bắt đầu era **AI làm task end-to-end**, không chỉ trả
+lời câu hỏi.
+
+Pattern chung: **agent loop** (observe → think → act → loop) với tools
+(file edit, terminal, browser, MCP servers).
+
+### 2025 — MCP standardization
+
+**Model Context Protocol** (Anthropic, 11/2024) trở thành standard de
+facto cho AI tool integration. Giảm phân mảnh giữa các framework.
+
+### 2025-2026 — Multimodal native
+
+GPT-4o, Gemini 2.0+ xử lý image/audio/video natively. Không phải
+"AI nhận diện ảnh" mà "AI hiểu video như con người xem".
+
+Apple Intelligence, Google Pixel AI, Samsung Galaxy AI — AI tích hợp
+sâu vào device. Không còn là "tính năng" mà là "OS layer".
+
+---
+
+## Pattern lịch sử cho dev 2026
+
+Nhìn 7 era, ta thấy 5 pattern lặp:
+
+### 1. Hype → Winter → Breakthrough → Lặp lại
+
+| Era | Hype peak          | Winter                 | Breakthrough      |
+| --- | ------------------ | ---------------------- | ----------------- |
+| 1   | Perceptron 1958    | XOR proof 1969         | Backprop 1986     |
+| 2   | Expert system 1985 | LISP machine fail 1989 | Statistical 1990s |
+| 3   | Big Data 2005      | (overlap)              | AlexNet 2012      |
+| 4   | Deep learning 2017 | (no winter, smooth)    | Transformer 2017  |
+| 5   | GPT-3 2020         | "GPT-4 already?"       | RLHF + ChatGPT    |
+| 7   | LLM scale 2023     | "scaling wall"         | Reasoning 2024    |
+
+Có thể có winter mới khi reasoning + agent gặp bottleneck. Đừng
+all-in 1 hướng.
+
+### 2. Hardware mới mở khóa idea cũ
+
+Backprop 1986 chỉ scale được 2012 nhờ GPU. Transformer 2017 chỉ scale
+được 2020 nhờ TPU. Algorithmic breakthrough thường đi sau hardware
+breakthrough.
+
+### 3. Data > Algorithm
+
+Mỗi lần ngành đổ tiền vào "thuật toán mới hơn", kết quả thua đối thủ
+"data nhiều hơn". Bài học: nếu bạn build AI app, **data quality** quan
+trọng hơn model choice.
+
+### 4. UI quan trọng hơn capability
+
+GPT-3 đã có 2020. Capability tương đương ChatGPT. Nhưng **chỉ
+ChatGPT bùng nổ** vì UI conversational. Build AI product → UI/UX là
+moat thực sự.
+
+### 5. Open source bắt kịp 6-12 tháng
+
+Mỗi proprietary model mới ra, open source sẽ có equivalent trong
+6-12 tháng. Đừng build dependency cứng vào 1 provider — model thay
+được.
+
+---
+
+## Bài học thực tế cho dev hôm nay
+
+### 1. Đừng tin "this changes everything"
+
+Mỗi đợt breakthrough đều được gắn nhãn "this changes everything".
+Phần lớn không thay đổi nhiều như hứa hẹn.
+
+GPT-4 không "thay thế programmer" như predict 2023. ChatGPT không
+"giết Google" như predict 2023. Reality nuanced hơn hype.
+
+### 2. Đừng dismiss "this is just hype"
+
+Ngược lại, có người dismiss AI mỗi đợt boom — "expert system thôi",
+"chatbot thôi", "tool autocomplete thôi". Cuối cùng họ bị bỏ lại.
+
+Cân bằng: thử, đánh giá thực tế, không max hype, không max dismiss.
+
+### 3. Hiểu giới hạn của thế hệ hiện tại
+
+LLM 2026 vẫn:
+
+- Hallucinate (sinh thông tin sai tự tin)
+- Limited reasoning (không phải mọi task)
+- Context window finite
+- Phụ thuộc training data cutoff
+
+Đừng giả định "AI sẽ solve mọi thứ trong 6 tháng". Lịch sử bảo: 6
+tháng = vài cải tiến nhỏ, không phải breakthrough.
+
+### 4. Học fundamental hơn tool
+
+Tool thay đổi: Cursor → Cursor 2 → cái khác. LangChain → MCP → cái
+khác. Nhưng **Transformer architecture, attention mechanism, scaling
+laws, RLHF** — concept bền 5-10 năm.
+
+Đầu tư học fundamental, sẽ pivot dễ hơn khi tool đổi.
+
+### 5. AI không thay thế dev có hiểu biết hệ thống
+
+Lịch sử cho thấy: AI nâng cao năng suất ở **task narrow**, không ở
+**hệ thống phức tạp**. Dev hiểu architecture, business logic, user
+need — chưa bị thay thế.
+
+Dev chỉ "stack overflow + paste" → đang bị thay thế. Vai trò dịch
+chuyển từ "code typist" sang "system designer" + "AI conductor".
+
+---
+
+## Tóm tắt 7 era
+
+```text
+1956 ─ Dartmouth Workshop (AI ra đời)
+1958 ─ Perceptron
+1969 ─ AI Winter 1 (Perceptron limitation)
+1980s ─ Expert Systems boom
+1990s ─ AI Winter 2 (Expert system collapse)
+1997 ─ Deep Blue thắng cờ vua
+2006 ─ Deep Learning được đặt tên
+2012 ─ AlexNet (ImageNet revolution)
+2014 ─ GANs
+2016 ─ AlphaGo
+2017 ─ Transformer (Attention is All You Need)
+2020 ─ GPT-3 + Scaling Laws
+2022 ─ ChatGPT (Nov 30) — AI everywhere
+2023 ─ GPT-4, Claude, LLaMA, AI hype peak
+2024 ─ Reasoning models (o1, DeepSeek-R1)
+2025 ─ Agentic AI + MCP standard
+2026 ─ Multimodal native + AI in OS
+```
+
+Mỗi mốc là 1 lần ngành "tưởng đã đến đỉnh". Chưa bao giờ đúng.
+
+---
+
+### Đọc thêm
+
+- [LLM Models Comparison](/blog/llm-models-comparison-guide)
+- [Tokens & Pricing](/blog/ai-tokens-and-pricing-explained)
+- [AI Hallucination](/blog/ai-hallucination-and-how-to-spot-it)
+- [Working with Coding Agents](/blog/working-with-coding-agents)
+
+### Reference
+
+- "Attention is All You Need" — Vaswani et al. 2017 ([arxiv.org/abs/1706.03762](https://arxiv.org/abs/1706.03762))
+- "Scaling Laws for Neural Language Models" — Kaplan et al. 2020
+- "Deep Learning" textbook — Goodfellow, Bengio, Courville (free online)
+- "AI: A Modern Approach" — Russell & Norvig (textbook chuẩn 30 năm)

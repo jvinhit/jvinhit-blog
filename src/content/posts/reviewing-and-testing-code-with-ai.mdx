@@ -1,0 +1,549 @@
+---
+title: 'Reviewing & Testing Code với AI — Kỹ năng survival của dev kỷ nguyên agent'
+description: 'Review code AI sinh ra sao cho không bị lừa, self-review trước PR, test pyramid với AI, generate test không phải generate coverage giả, flaky test hunting, và checklist review chi tiết dùng được ngay.'
+pubDate: 2026-04-30
+tags: [ai, coding-agent, code-review, testing, workflow, productivity]
+draft: false
+---
+
+Trong kỷ nguyên agent, dev viết code ít hơn nhưng **review code nhiều
+hơn**. Code bạn review không chỉ của đồng nghiệp mà còn của AI — và AI
+viết code với chất lượng **không đều**: khi xuất thần đạt mức senior,
+khi ngớ ngẩn mức intern.
+
+Kỹ năng review chất lượng + test thoughtful là **khoản đầu tư có ROI cao
+nhất** cho dev hiện tại. Bài này đi vào cả hai.
+
+---
+
+## 1. Review kỷ nguyên agent — khác trước ra sao
+
+Review truyền thống: đồng nghiệp mở 1 PR. Bạn đọc, comment, hỏi, approve.
+Quy mô PR = quy mô time người đó bỏ ra.
+
+Review kỷ nguyên agent: agent có thể output **500 dòng trong 3 phút**. PR
+khổng lồ thường xuyên. Và đặc biệt:
+
+- Agent **không biết context tribal** của team → dễ break convention.
+- Agent **lạm dụng abstraction** → over-engineer cho task đơn giản.
+- Agent **xóa code không hiểu lý do tồn tại** → remove safety net.
+- Agent **test pass** không có nghĩa code đúng — có thể test chỉ "nhìn
+  có vẻ đúng".
+
+Nghĩa là: **bar review phải cao hơn**, không thấp hơn.
+
+---
+
+## 2. Ba lớp review — đừng gộp thành một
+
+Review hiệu quả chia 3 lớp riêng biệt, mỗi lớp focus khác nhau:
+
+```text
+┌─────────────────────────────────────────────────┐
+│  Lớp 1: CORRECTNESS                             │
+│  "Code có làm đúng việc ticket yêu cầu không?"  │
+│                                                 │
+│  Lớp 2: QUALITY                                 │
+│  "Code có maintainable, secure, performant?"    │
+│                                                 │
+│  Lớp 3: FIT                                     │
+│  "Code có match style + pattern của codebase?"  │
+└─────────────────────────────────────────────────┘
+```
+
+Mixing 3 lớp → review rối, comment vụn. Reviewer pro đi từng lớp.
+
+### Lớp 1: Correctness
+
+- Acceptance criteria của ticket — cover hết không?
+- Edge case trong spec — có xử lý không?
+- Test case thực sự test behavior, không chỉ "code run without throw"?
+
+AI support tốt lớp này:
+
+```text
+"Review @<file> với acceptance criteria:
+[paste AC]
+
+Với mỗi AC, đánh dấu:
+- DONE (chỉ ra code dòng nào)
+- MISSING (giải thích gì chưa cover)
+- UNCLEAR (spec chưa rõ)"
+```
+
+### Lớp 2: Quality
+
+- Security: XSS, SQL injection, secret leak, unsafe deserialization.
+- Performance: N+1 query, unbounded loop, blocking main thread.
+- Error handling: swallow error, no logging, bare `catch` trống.
+- Resource: memory leak, unclosed file handle, connection pool.
+
+### Lớp 3: Fit
+
+- Naming match convention team.
+- Pattern consistent với module liền kề.
+- Abstraction level phù hợp — không over-engineer, không copy-paste.
+- Test location, folder structure.
+
+Lớp 3 là nơi AI **yếu nhất** vì nó không biết convention nội bộ.
+[Rules](/blog/cursor-rules-guide) giúp cover phần này tự động.
+
+---
+
+## 3. Self-review trước khi mở PR
+
+Quy tắc: **đừng là người đầu tiên đọc code là reviewer**. Bạn phải
+self-review trước.
+
+### Workflow self-review
+
+```text
+1. Đọc diff chính bạn viết (git diff main)
+   → Nhìn như người ngoài, 5 phút
+
+2. Chạy test full suite
+   → Không chỉ test mới
+
+3. Chạy lint + typecheck
+   → Clean slate
+
+4. AI self-review
+   → Prompt dưới đây
+
+5. Fix issue tìm được
+6. Mở PR khi hết issue
+```
+
+### Prompt self-review
+
+```text
+"Đây là diff tôi vừa viết:
+[git diff]
+
+Review theo 3 lớp:
+
+Lớp 1 Correctness:
+- Logic có đúng task '<task name>' không?
+- Edge case: null, empty, boundary
+- Có bug tiềm ẩn không?
+
+Lớp 2 Quality:
+- Security risk
+- Performance concern
+- Error handling
+
+Lớp 3 Fit:
+- Naming + style match codebase (@<reference file>)
+- Có đoạn nào có thể đơn giản hơn không?
+
+Output: list issue, sắp theo priority. KHÔNG fix."
+```
+
+**Không fix** quan trọng — bạn muốn list để **quyết định fix gì**,
+không phải AI tự sửa. Nhiều issue AI flag là false positive.
+
+### Các câu hỏi tự vấn không cần AI
+
+Không có AI vẫn hỏi được:
+
+- Tôi có hiểu mọi dòng trong diff không?
+- Dòng nào AI viết mà tôi đang "tin blindly"?
+- Có file nào tôi edit mà không chắc tại sao phải edit?
+- Nếu junior hỏi "dòng này làm gì", tôi giải thích được không?
+
+Trả lời "không chắc" cho bất kỳ câu nào → **đọc lại trước khi PR**.
+
+---
+
+## 4. Review code AI sinh ra — red flags
+
+AI có những "tell" khi gen code. Học nhận ra để review nhanh hơn:
+
+### Red flag 1: Defensive check lạ
+
+```ts
+if (user && user.id && typeof user.id === 'string' && user.id.length > 0) {
+  // actual logic
+}
+```
+
+Paranoid check ở chỗ logic đảm bảo `user.id` luôn là string non-empty.
+AI "cẩn thận" vì không chắc type → thêm check thừa. Xóa, dùng type system.
+
+### Red flag 2: Try-catch nuốt error
+
+```ts
+try {
+  await someOperation();
+} catch (error) {
+  console.log('Error occurred:', error);
+}
+```
+
+Log rồi thôi → error bị nuốt, caller không biết. AI thường làm vậy để
+"code không crash". Thực tế là **hide bug**.
+
+### Red flag 3: Magic string / số
+
+```ts
+if (status === 'ACTIVE_PENDING_REVIEW_V2') { ... }
+setTimeout(poll, 3000);
+```
+
+Hardcode, không const, không comment. AI dùng string plausible mà không
+biết codebase đã có enum / const.
+
+### Red flag 4: Import không dùng
+
+AI thường import `useEffect`, `useState` ngay cả khi code không dùng.
+Tại sao? Vì pattern "file React thường import những cái này". Lint catch
+được, nhưng bạn vẫn nên để ý.
+
+### Red flag 5: Comment tự sự
+
+```ts
+// Iterate through the items
+for (const item of items) {
+  // Process each item
+  processItem(item);
+}
+```
+
+Comment narrate what → noise. Xóa hết. Nếu cần comment, comment
+**why**.
+
+### Red flag 6: Abstraction không cần thiết
+
+```ts
+// AI gen cho 1 endpoint GET duy nhất:
+class UserRepository {
+  constructor(private db: Database) {}
+  async findById(id: string) { ... }
+  async findByIdWithFallback(id: string) { ... }
+  async findByIdCached(id: string) { ... }
+}
+```
+
+Task chỉ cần 1 query. AI gen 3 method + class + DI. YAGNI violation
+nặng. Simplify thành 1 function.
+
+### Red flag 7: Test check implementation detail
+
+```ts
+it('calls setState once with correct value', () => {
+  const setState = jest.fn();
+  component.useState = setState;
+  component.handleClick();
+  expect(setState).toHaveBeenCalledWith(1);
+});
+```
+
+Test mock `useState` + check call → test re-state implementation. Đổi
+implementation (vd sang `useReducer`) → test fail dù behavior giống.
+
+Test tốt check **observable output**, không check internal calls.
+
+---
+
+## 5. Testing — chiến lược, không chỉ coverage
+
+### Test pyramid — nguyên tắc vĩnh cửu
+
+```text
+            ╱────────╲
+           ╱   E2E    ╲     ← ít, chậm, flaky nhất
+          ╱────────────╲       (1-5% total)
+         ╱              ╲
+        ╱  Integration   ╲   ← trung bình
+       ╱──────────────────╲     (20-30%)
+      ╱                    ╲
+     ╱      Unit            ╲ ← nhiều, nhanh, ổn định
+    ╱────────────────────────╲  (65-80%)
+```
+
+Ngược kim tự tháp (nhiều E2E, ít unit) = flaky + chậm + khó maintain.
+
+### AI-generated test — cẩn thận "coverage giả"
+
+Request AI "viết test cho file này" → thường được:
+
+```ts
+it('calls function', () => {
+  const result = myFunction(input);
+  expect(result).toBeDefined();
+});
+```
+
+Coverage tool báo 100% dòng. Nhưng test này **không kiểm tra gì**.
+`toBeDefined` pass cho mọi non-undefined return. Code hỏng → test vẫn
+pass.
+
+Prompt test hiệu quả phải **ép AI nghĩ về behavior**:
+
+```text
+"Viết test cho @src/lib/calculateTax.ts.
+
+Yêu cầu:
+- Mỗi test test 1 BEHAVIOR cụ thể (không phải 1 dòng code)
+- Cover các case: happy path, edge (0, negative, max), error (invalid
+  input), boundary
+- Tên test format: 'should <expected behavior> when <condition>'
+- Assert cụ thể, KHÔNG dùng toBeDefined / toBeTruthy nếu có giá trị
+  chính xác để check
+- Nếu cần mock, chỉ mock external boundary (HTTP, DB), KHÔNG mock
+  internal function"
+```
+
+Output khác hẳn:
+
+```ts
+describe('calculateTax', () => {
+  it('should return 0 when amount is 0', () => {
+    expect(calculateTax(0, 0.1)).toBe(0);
+  });
+
+  it('should round to 2 decimal places', () => {
+    expect(calculateTax(100, 0.0725)).toBe(7.25);
+  });
+
+  it('should throw on negative amount', () => {
+    expect(() => calculateTax(-10, 0.1)).toThrow('amount must be non-negative');
+  });
+
+  it('should handle max safe integer without precision loss', () => {
+    expect(calculateTax(Number.MAX_SAFE_INTEGER, 0.01)).toBe(
+      Math.round(Number.MAX_SAFE_INTEGER * 0.01)
+    );
+  });
+});
+```
+
+Test như thế này **bảo vệ regression**.
+
+### Test types by layer
+
+#### Unit test
+
+- Function / class nhỏ, không dep bên ngoài.
+- Mock HTTP / DB / filesystem.
+- Chạy < 100ms mỗi test.
+- **AI sinh tốt nếu prompt đúng**.
+
+#### Integration test
+
+- Nhiều module cùng chạy.
+- Test thật với DB (test container / in-memory).
+- Mock HTTP ngoài.
+- AI sinh OK, bạn cần verify setup đúng (migrations, seed data).
+
+#### E2E test
+
+- Chạy full app trong browser.
+- Test user journey.
+- Chậm, flaky nếu không cẩn thận.
+- AI giúp viết step, nhưng selector + wait strategy cần tay người.
+
+### Test-first cho logic core
+
+Với code quan trọng (payment, auth, crypto):
+
+1. **Viết test trước** khi viết code.
+2. Test phản ánh spec từ ticket/docs.
+3. Implement cho đến khi test pass.
+4. Refactor an toàn vì có test.
+
+AI không thay thế tư duy TDD. Nhưng giúp:
+
+- Sinh test skeleton nhanh.
+- Suggest edge case bạn miss.
+- Validate coverage sau implement.
+
+---
+
+## 6. Flaky test — kẻ thù của tin tưởng
+
+Test pass 9/10 lần, fail 1/10 không có lý do rõ ràng = flaky. Tổ hại:
+
+- CI fail → dev retry → fix nhầm, miss bug thật.
+- Dần dần team **ignore test fail** → test thành trang trí.
+- Mất niềm tin vào suite → không dám refactor.
+
+### Nguyên nhân flaky phổ biến
+
+- **Timing**: `setTimeout` thay vì `waitFor`.
+- **Order dependency**: test A leak state sang test B.
+- **Không determinism**: `Math.random()`, `Date.now()` không mock.
+- **Network**: real HTTP thay vì mock.
+- **DOM**: querying trước khi render xong.
+
+### AI giúp fix flaky
+
+```text
+"Test @<file> đang flaky. Pass 8/10 lần. Log khi fail: [paste]
+
+Phân tích:
+1. Non-determinism source khả năng cao nhất
+2. Order dependency check: test này có đọc/ghi global state không?
+3. Async handling: có `await` đúng chỗ chưa?
+4. Suggestion fix"
+```
+
+AI thường spot được ngay vì flaky pattern rất recognizable.
+
+---
+
+## 7. Snapshot test — con dao hai lưỡi
+
+Snapshot test (Jest `.toMatchSnapshot()`) sinh ra từ output thật, lưu
+lại, so sánh lần chạy sau.
+
+**Ưu**: nhanh viết, catch regression UI.
+
+**Nhược**:
+
+- Dev lười → `jest --updateSnapshot` mỗi lần fail, không nhìn diff.
+- Snapshot thành noise trong PR, khó review.
+- False sense of security.
+
+**Khi nên dùng**: output determinitic, nhỏ, ít thay đổi (ví dụ JSON
+schema, HTML component static).
+
+**Khi không nên**: UI component thay đổi liên tục, output có timestamp /
+random.
+
+AI hay đề xuất snapshot cho mọi thứ. Bạn quyết định, không AI.
+
+---
+
+## 8. Checklist review chi tiết
+
+Dùng trước khi approve mọi PR. Copy vào Cursor Rule `pr-review.mdc` để
+agent tự follow khi bạn review.
+
+### Correctness
+
+- [ ] AC của ticket cover hết
+- [ ] Edge case: null, empty, boundary (0, max)
+- [ ] Error path có handle
+- [ ] Không có TODO / FIXME lạc trong diff
+- [ ] Không có `console.log` debug quên xóa
+
+### Quality
+
+- [ ] Không secret hardcode
+- [ ] Input user validate trước khi dùng (SQL, XSS, path traversal)
+- [ ] N+1 query check
+- [ ] Không blocking main thread (heavy sync loop)
+- [ ] Dependency mới: có đánh giá, đã cần thiết?
+
+### Test
+
+- [ ] Test case tương ứng với behavior, không re-state implementation
+- [ ] Coverage path mới, không chỉ coverage dòng
+- [ ] Không mock quá mức (mock internal function = smell)
+- [ ] Không có test `.skip` / `.only` quên xoá
+- [ ] Flaky check: chạy local 3 lần cùng pass
+
+### Style & Fit
+
+- [ ] Naming match codebase
+- [ ] Import path alias đúng
+- [ ] Comment "why" không "what"
+- [ ] Component size hợp lý
+- [ ] No commented-out code
+
+### Meta
+
+- [ ] Commit message clear (conventional commit)
+- [ ] PR description giải thích **why**
+- [ ] Link ticket
+- [ ] Breaking change? Có note migration?
+
+---
+
+## 9. Các workflow thực tế
+
+### 9.1. Review PR của đồng nghiệp (có AI hỗ trợ)
+
+```text
+1. Đọc PR description → hiểu intent
+2. Diff high-level → file nào to, file nào phụ
+3. Review tay file core
+4. AI summarize file phụ → skim nhanh
+5. AI generate test gợi ý → compare với test đã có
+6. Comment issue tìm được
+7. Approve khi clean
+```
+
+AI không thay thế bước 1, 3, 6. AI hỗ trợ bước 2, 4, 5.
+
+### 9.2. Review PR của AI agent (bạn là người gác cổng)
+
+Bar cao hơn. Agent không biết tại sao nó viết vậy → bạn phải biết.
+
+```text
+1. Đọc plan agent đã theo
+2. Từng commit → verify match plan
+3. Chạy demo feature
+4. Spot-check 3-5 file random (không ưu tiên file lớn — agent thường
+   giấu bug ở file phụ)
+5. Check diff có edit file "không nên edit" không (config, CI, lock
+   file)
+6. Review test skeptical
+7. Merge khi tất cả pass
+```
+
+### 9.3. Test-driven với AI
+
+```text
+1. Viết test case theo spec (bạn, không AI)
+2. Chạy test → fail
+3. AI implement đến khi pass
+4. Review diff
+5. Refactor nếu cần (AI giúp)
+6. Commit
+```
+
+Workflow này có độ tin cao nhất khi làm feature phức tạp.
+
+---
+
+## 10. Tổng kết
+
+Review và testing là "lá chắn" cuối cùng giữa code AI và production.
+Skill này **không thể outsource** — vì chính bạn là người gác cổng.
+
+Nguyên tắc:
+
+1. **3 lớp review**: correctness, quality, fit. Không gộp.
+2. **Self-review trước PR**: không là người đầu tiên đọc code của
+   chính mình.
+3. **Red flag AI code**: defensive check thừa, catch swallow, magic
+   value, test implementation detail.
+4. **Test behavior, không implementation**: test tốt bảo vệ regression,
+   test dở chỉ tăng coverage giả.
+5. **Test pyramid**: nhiều unit, vừa integration, ít E2E.
+6. **Flaky test không được tolerate**: fix ngay hoặc xóa.
+7. **AI gen test phải prompt đúng**: ép AI nghĩ behavior, không chỉ
+   cover lines.
+
+Dev giỏi trong kỷ nguyên agent = **người reviewer giỏi, test thoughtful,
+thấu hiểu code mình merge**. Skill này không cũ đi, ngược lại càng
+giá trị vì AI sinh code càng nhiều.
+
+Bài tiếp trong series: **Customizing agents** — tổng hợp Rules + Skills
+
+- MCP + Sub-agents thành 1 playbook cá nhân hoá.
+
+---
+
+### Đọc thêm
+
+- [Working with Coding Agents](/blog/working-with-coding-agents)
+- [Developing Features with AI](/blog/developing-features-with-ai)
+- [Finding and Fixing Bugs with AI](/blog/finding-and-fixing-bugs-with-ai)
+- [Cursor Rules](/blog/cursor-rules-guide) — encode review checklist
+- [AI Hallucination](/blog/ai-hallucination-and-how-to-spot-it) — vì sao
+  AI fool được reviewer cẩu thả
+- Cursor Learn course ([cursor.com/learn](https://cursor.com/learn)) —
+  reference bổ sung tiếng Anh

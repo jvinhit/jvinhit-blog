@@ -62,7 +62,7 @@ const years = Object.keys(grouped).sort((a, b) => Number(b) - Number(a));
                   <div class="flex items-baseline justify-between gap-3">
                     <a
                       href={withBase(`/blog/${post.id}`)}
-                      class="text-base font-medium leading-snug group-hover:text-[var(--color-accent)] after:absolute after:inset-0 after:content-[''] sm:text-lg"
+                      class="text-base leading-snug font-medium group-hover:text-[var(--color-accent)] after:absolute after:inset-0 after:content-[''] sm:text-lg"
                     >
                       {post.data.title}
                     </a>

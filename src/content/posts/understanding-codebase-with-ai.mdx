@@ -1,0 +1,402 @@
+---
+title: 'Hiểu Codebase mới bằng AI — Từ "Day 1 panic" đến làm chủ trong 1 tuần'
+description: 'Chiến lược dùng AI để onboard codebase lớn: bird-eye view trước, entry-point mapping, dependency tracing, git history archaeology. So sánh với đọc code tuần tự và grep thủ công — thứ đã cũ từ 2023.'
+pubDate: 2026-04-30
+tags: [ai, coding-agent, codebase, onboarding, workflow, productivity]
+draft: false
+---
+
+Tình huống quen thuộc: bạn join dự án mới, được giao 1 ticket, mở
+codebase 3000 file và mở được đúng 1 file `README.md` rỗng. Sếp cười: "Cứ
+đọc code đi, có gì hỏi tao."
+
+Trước kỷ nguyên AI, hiểu 1 codebase trung bình tốn **2-4 tuần**. Giờ có
+agent, con số đó có thể còn **3-5 ngày** — nếu bạn dùng đúng cách. Dùng
+sai thì vẫn 4 tuần, thậm thoặt thêm bug vì copy code AI explain nhầm.
+
+Bài này là playbook thực chiến để "giải phẫu" codebase lạ bằng AI.
+
+---
+
+## 1. Vì sao codebase khó hiểu — và AI giải quyết được phần nào
+
+Codebase trung bình của startup sau 3 năm:
+
+```text
+- 500-5000 files
+- 10-50 dependencies (một số đã deprecated)
+- 3-5 người đã làm, 2 người đã nghỉ
+- Pattern mix: 70% modern + 20% legacy + 10% "thử nghiệm quên undo"
+- README cập nhật lần cuối 18 tháng trước
+```
+
+Vấn đề cốt lõi: **kiến thức nằm ở đầu người** — người đã nghỉ. Comment
+không có. Docs không viết. Code tự giải thích? Chỉ phần nào.
+
+AI không có magical solution cho vấn đề "knowledge tribal", nhưng nó tăng
+tốc 3 thứ:
+
+- **Đọc nhanh + tóm tắt**: bạn hỏi "file này làm gì", AI đọc 500 dòng
+  trong 2s và summary vài câu.
+- **Cross-file reasoning**: AI follow được `A → B → C` khi bạn chỉ có
+  tên symbol.
+- **Pattern recognition**: AI đã thấy hàng triệu codebase → nhận ra đây
+  là factory pattern, đây là observer, đây là anti-pattern.
+
+Hạn chế AI không cover được:
+
+- **Ý đồ kinh doanh**: vì sao code viết thế này → chỉ người đã làm biết.
+- **Race condition**: AI đọc static → không suy được runtime behavior.
+- **Kiến thức domain**: tax calculator Nhật khác Việt Nam — AI không
+  biết domain của bạn.
+
+Hiểu rõ giới hạn này → dùng AI làm **tăng tốc**, không thay thế thinking.
+
+---
+
+## 2. Nguyên tắc vàng: Top-down trước, Bottom-up sau
+
+Sai lầm phổ biến của dev mới: mở file đầu tiên, đọc từ trên xuống dưới.
+1 tiếng sau vẫn ở file đó, không hiểu nó fit vào đâu.
+
+Chiến lược đúng: **4 tầng, đi từ cao xuống thấp**.
+
+```text
+Tầng 1: Business context       "Project này làm gì cho ai?"
+Tầng 2: Architecture            "Phần nào gọi phần nào?"
+Tầng 3: Module / Feature        "Module auth hoạt động thế nào?"
+Tầng 4: Implementation          "Hàm login() parse token ra sao?"
+```
+
+Đa số dev nhảy thẳng xuống tầng 4 → lạc. Tầng 1-2 mới là map để
+không lạc.
+
+---
+
+## 3. Workflow 5 bước đọc codebase với AI
+
+### Bước 1: Birds-eye view (30 phút)
+
+Mở Cursor chat, prompt:
+
+```text
+"@README.md @package.json @astro.config.mjs @tsconfig.json
+
+Tôi mới join dự án này. Tóm tắt trong 5 câu:
+1. Project này làm gì?
+2. Stack chính?
+3. Entry point ở đâu (main script, route file)?
+4. Kiến trúc tổng quan?
+5. Có gì bất thường so với project TypeScript chuẩn không?"
+```
+
+Agent đọc các file config → tổng hợp. Output thường đủ để bạn hiểu 70%
+big picture. 30% còn lại bạn sẽ khám phá tiếp.
+
+**Tip**: attach file theo thứ tự ưu tiên — `README`, `package.json`,
+config chính, `src/index.*` hoặc route entry.
+
+### Bước 2: Vẽ architecture map
+
+```text
+"Dựa trên cấu trúc folder @src/, vẽ sơ đồ ASCII tóm tắt:
+- Mỗi folder làm nhiệm vụ gì
+- Folder nào phụ thuộc folder nào
+- Flow 1 request điển hình đi qua những folder nào"
+```
+
+AI trả về cái gì đó như:
+
+```text
+Request → src/pages/ (routing)
+           ↓
+         src/components/ (UI render)
+           ↓ fetch data from
+         src/lib/api/ (HTTP clients)
+           ↓ query
+         src/db/ (Prisma ORM)
+```
+
+Đây là **tài liệu bạn nên copy vào Notion/Obsidian** làm bộ nhớ cá nhân.
+Đọc lại bất kỳ khi nào lạc.
+
+### Bước 3: Trace một feature thật
+
+Chọn 1 feature bạn biết chắc chắn có (vd "đăng nhập"). Hỏi:
+
+```text
+"Tôi muốn trace feature login. Từ lúc user click nút Submit trên UI
+đến khi lưu session. Liệt kê file + function + thứ tự gọi nhau.
+Nếu có bước không chắc, nói rõ 'chưa verify'."
+```
+
+Cursor với `@codebase` sẽ grep semantic → đưa ra chain gọi. Bạn click
+vào từng file, đối chiếu → học được pattern routing, state management,
+data flow cùng lúc.
+
+**Pro tip**: yêu cầu AI đánh dấu "chưa verify" ép nó honest. Nếu không,
+AI sẽ invent thêm các bước nghe có vẻ đúng.
+
+### Bước 4: Dependency graph cho module khó
+
+Module phức tạp (vd authentication, payment, caching)? Hỏi:
+
+```text
+"Trong @src/auth/, liệt kê tất cả export. Với mỗi export:
+- File nào import nó? (dùng workspace search)
+- Nó import gì từ ngoài folder auth?
+
+Mục tiêu: hiểu boundary của module này."
+```
+
+Output giúp bạn biết **sửa cái gì là an toàn** (ít consumer) và
+**cái gì nguy hiểm** (dùng khắp nơi).
+
+### Bước 5: Git archaeology
+
+Hỏi "tại sao" là câu khó nhất. Git log biết.
+
+```text
+"Chạy git log --follow -p src/lib/tax.ts và tóm tắt:
+- File này tạo khi nào, ai, commit message gì?
+- 3 thay đổi lớn gần đây là gì, lý do?
+- Có commit nào fix bug mà không có test kèm không?"
+```
+
+Agent có `run_shell` tool sẽ tự chạy git. Commit message dở → ít nhất
+bạn biết **tên người** để đi hỏi.
+
+---
+
+## 4. Kỹ thuật nâng cao
+
+### 4.1. Ask-don't-read
+
+Thay vì đọc 300 dòng file `calculateDiscount.ts`:
+
+```text
+"Đọc @src/lib/calculateDiscount.ts và trả lời:
+- Input / output chính xác
+- 3 edge case xử lý
+- Có depend bên ngoài gì không"
+```
+
+Bạn tiết kiệm 15 phút đọc, AI summary trong 10s. Sau đó **spot-check**
+2-3 điểm bằng mắt thật.
+
+### 4.2. Socratic questioning
+
+Với code khó, dùng chat mode để AI "dạy" bạn từng bước:
+
+```text
+Bạn: "Giải thích hook useSyncExternalStore trong file này"
+AI: [giải thích]
+Bạn: "Tại sao cần nó, dùng useState không được sao?"
+AI: [giải thích race condition với concurrent rendering]
+Bạn: "Cho ví dụ trường hợp fail khi dùng useState"
+AI: [ví dụ]
+```
+
+Bạn học nhanh hơn nhiều so với đọc docs official — vì hỏi đúng thứ bạn
+không hiểu, không phải đọc tuần tự docs.
+
+### 4.3. Code walking với sub-agent
+
+Codebase quá lớn → parent agent hết context nhanh. Dùng
+[sub-agent](/blog/cursor-sub-agents-guide) khảo sát:
+
+```text
+Task(subagent_type: "explore",
+     prompt: "Trong @src/, tìm tất cả nơi dùng pattern
+              'Repository' hoặc 'Service' class.
+              Trả về: tên class, file, purpose (1 câu).
+              Không trả full code.")
+```
+
+Sub-agent đọc cả trăm file, parent chỉ nhận list 20 item. Không đốt
+context.
+
+### 4.4. Diff-based learning
+
+PR gần nhất là cách học nhanh pattern hiện tại của team:
+
+```text
+"Xem @.git/commit/HEAD~10..HEAD. Tóm tắt 3 pattern thay đổi gần đây:
+- Cách thêm 1 API route mới
+- Cách viết unit test trong project này
+- Cách thêm dependency"
+```
+
+Bạn học **style hiện tại** của team, không phải style cũ trong legacy
+code.
+
+---
+
+## 5. Những sai lầm làm AI "lừa" bạn khi đọc codebase
+
+### ❌ 5.1. Tin 100% explanation không verify
+
+AI summary 1 hàm là "return the user's age in months". Bạn tin → bug
+production vì thật ra hàm return **weeks**. AI confused giữa constant
+`4.345` (weeks per month) và `30` (days per month).
+
+**Fix**: sau mỗi explanation quan trọng, **mở file đọc tay** 2-3 dòng
+key logic. Chỉ mất 1 phút nhưng cứu bug.
+
+### ❌ 5.2. Hỏi quá rộng
+
+```text
+❌ "Tell me about this codebase"
+→ AI chọn random 10 file summary, miss 90% quan trọng.
+
+✅ "Tell me about how auth works in this codebase,
+    starting from the login endpoint"
+→ Có anchor point, AI trace chính xác.
+```
+
+### ❌ 5.3. Không check "coverage" của AI
+
+AI nói "đây là toàn bộ auth flow" — nhưng thực ra có thêm 1 module SSO
+nó miss vì file tên không có từ "auth".
+
+**Fix**: sau khi AI liệt kê, hỏi lại: "Có path nào khác để authenticate
+không? Check file tên khác như sso, oauth, token, jwt..."
+
+### ❌ 5.4. Không cập nhật mental model
+
+Sau 3 ngày đọc, bạn có 1 mental model. Code thay đổi (team merge PR
+lớn) → model cũ sai. Nhưng bạn vẫn dựa vào nó.
+
+**Fix**: tuần 1 lần chạy lại bước 2 (architecture map) để check drift.
+
+### ❌ 5.5. Dùng AI thay cho đọc docs official
+
+Framework docs (React, Astro, Tailwind) **luôn chính xác hơn** AI
+explain. Đặc biệt với version mới.
+
+**Fix**: AI cho bạn context của **codebase này**. Docs cho bạn context
+của **framework**. Cả hai bổ sung, không thay thế.
+
+---
+
+## 6. Tools bạn nên biết
+
+### Cursor
+
+- **`@file.ts`**: attach file cụ thể
+- **`@folder/`**: attach cả folder
+- **`@codebase`**: semantic search toàn codebase
+- **`@git`**: xem history, blame
+- **`@web`**: search docs online nếu AI cần thêm context
+
+### MCP servers hữu ích
+
+- **GitHub MCP**: query commit, PR, issue — giúp "xem ai đã viết code
+  này, lý do gì".
+- **Context7 / package docs MCP**: AI đọc docs library real-time, tránh
+  hallucinate API sai version.
+- **Database schema MCP**: nếu codebase query SQL phức tạp, MCP đọc
+  schema giúp AI hiểu table nào là gì.
+
+### Non-AI tools vẫn quan trọng
+
+- **`ast-grep` / `grep`**: pattern search chính xác (AI search semantic
+  đôi khi miss).
+- **`tree`**: xem cấu trúc folder nhanh hơn hỏi AI.
+- **`gh pr list --search ...`**: archeology bằng GitHub CLI.
+- **Git blame trong IDE**: biết dòng code này ai viết, khi nào.
+
+---
+
+## 7. Case study: 1 tuần onboard codebase mới
+
+Lịch thực tế tôi đã làm khi join 1 project Astro + Hono + Postgres:
+
+### Ngày 1 — Big picture
+
+- Sáng: README, package.json, architecture map (1h với Cursor chat).
+- Chiều: chạy dev server local, click qua mọi page. Ghi chú những UI
+  element quan trọng.
+- Tối: đọc 5 commit gần nhất để cảm nhận tempo.
+
+### Ngày 2 — Data layer
+
+- Hỏi AI: "Schema database có gì? File migration ở đâu?"
+- Đọc từng migration theo thứ tự — hiểu evolution.
+- Trace 1 entity (User) qua tất cả layer: DB → repo → service →
+  API → UI.
+
+### Ngày 3 — Auth flow
+
+- Task thực tế đầu tiên: thêm log cho login endpoint.
+- Trước khi code: dùng AI trace full auth flow (Bước 3 ở trên).
+- Code đổi 3 dòng, review xong trước lunch.
+
+### Ngày 4 — Module phức tạp nhất
+
+- Project có module "billing" rối nhất (7 file, nhiều state).
+- Pair với senior 30 phút để hỏi ý đồ thiết kế (AI không trả lời được
+  "vì sao").
+- Phần implementation detail thì AI giúp trace.
+
+### Ngày 5 — Ship feature nhỏ
+
+- Pick ticket dễ (add 1 field vào profile).
+- Self-implement. Dùng AI cho scaffold + test.
+- Ship. Merge ngày thứ 6.
+
+Sau 1 tuần: nắm 80% codebase đủ để làm ticket medium. Trước AI, con số
+này là 2-3 tuần. Không phải "AI làm thay" — mà là AI rút ngắn vòng
+feedback từ "tự đọc → đoán" sang "hỏi → hiểu → verify".
+
+---
+
+## 8. Framework tư duy: từ consumer đến contributor
+
+Onboarding chia 3 giai đoạn. AI có vai trò khác ở mỗi giai đoạn:
+
+| Giai đoạn        | Ngày | AI làm gì                        | Bạn làm gì                                    |
+| ---------------- | ---- | -------------------------------- | --------------------------------------------- |
+| **Consumer**     | 1-3  | Summary, trace, explain          | Hỏi nhiều, đọc nhiều, ghi chú                 |
+| **Collaborator** | 4-7  | Scaffold code, suggest edits     | Review AI, hỏi senior các quyết định thiết kế |
+| **Contributor**  | 8+   | Implement theo spec, review diff | Lead feature, review PR của người khác        |
+
+Đừng ở giai đoạn **Consumer** quá 1 tuần. Bạn học qua làm, không phải
+qua đọc. Làm feature nhỏ càng sớm càng tốt.
+
+---
+
+## 9. Tổng kết
+
+Hiểu codebase lạ là bài toán **thông tin thiếu** — và AI là công cụ
+retrieve thông tin đỉnh nhất từng có. Dùng đúng, bạn có:
+
+1. Big picture trong **1 giờ** (thay vì 1 ngày đọc file random).
+2. Module map chính xác trong **30 phút** (thay vì 1 buổi chiều
+   follow `Ctrl+Click`).
+3. Git archeology trong **vài câu hỏi** (thay vì đọc log tay hàng giờ).
+4. Code walkthrough có feedback loop — hỏi lại khi không hiểu.
+
+Nhưng AI **không thay thế** việc:
+
+- Hỏi người thật về ý đồ thiết kế.
+- Verify explanation bằng đọc code thật.
+- Tự tay làm ticket đầu tiên.
+
+Dev onboard nhanh trong kỷ nguyên AI không phải dev "xài AI giỏi" —
+mà là dev biết **khi nào AI sai, khi nào cần người, khi nào cần tự đọc**.
+
+Bài tiếp theo sẽ đi vào giai đoạn **Contributor** — workflow develop
+feature từ ticket đến deploy với AI làm đối tác.
+
+---
+
+### Đọc thêm
+
+- [Working with Coding Agents](/blog/working-with-coding-agents)
+- [Cursor Sub-agents](/blog/cursor-sub-agents-guide) — delegate heavy read
+- [Cursor Skills](/blog/cursor-skills-beginner-guide) — đóng gói workflow
+- [AI Hallucination](/blog/ai-hallucination-and-how-to-spot-it) — vì sao
+  phải verify AI explanation
+- Cursor Learn course ([cursor.com/learn](https://cursor.com/learn)) — góc
+  nhìn tiếng Anh, tham khảo bổ sung

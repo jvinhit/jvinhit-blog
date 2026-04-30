@@ -18,11 +18,11 @@ mất công hơn**. Áp dụng lần lượt, không nhất thiết phải dùng
 
 Trước khi tối ưu, nắm 3 khái niệm cơ bản:
 
-| Khái niệm     | Ý nghĩa                                                     |
-| ------------- | ----------------------------------------------------------- |
-| **FOIT**      | Flash of Invisible Text — text vô hình trong khi chờ font   |
-| **FOUT**      | Flash of Unstyled Text — text hiện fallback rồi mới swap    |
-| **CLS**       | Cumulative Layout Shift khi fallback ↔ webfont khác metric  |
+| Khái niệm | Ý nghĩa                                                    |
+| --------- | ---------------------------------------------------------- |
+| **FOIT**  | Flash of Invisible Text — text vô hình trong khi chờ font  |
+| **FOUT**  | Flash of Unstyled Text — text hiện fallback rồi mới swap   |
+| **CLS**   | Cumulative Layout Shift khi fallback ↔ webfont khác metric |
 
 ### Pipeline: từ HTML request tới pixel trên màn hình
 
@@ -88,13 +88,13 @@ bằng metric override fallback.
 `font-display: swap` là mặc định của Google Fonts và cũng là nguyên nhân
 phổ biến nhất gây FOUT. Bảng so sánh:
 
-| Giá trị    | Block period | Swap period | Khi nào dùng                                              |
-| ---------- | ------------ | ----------- | --------------------------------------------------------- |
-| `auto`     | tuỳ browser  | tuỳ browser | Để browser quyết — thường giống `block`                   |
-| `block`    | ~3s          | ∞           | Logo, branding bắt buộc đúng font, chấp nhận text ẩn      |
-| `swap`     | ~100ms       | ∞           | Muốn text hiện ngay, chấp nhận FOUT                       |
-| `fallback` | ~100ms       | ~3s         | Compromise — sau 3s thì thôi, dùng fallback hết session    |
-| `optional` | ~100ms       | 0           | **Font chỉ là "nice to have"** — không swap giữa chừng    |
+| Giá trị    | Block period | Swap period | Khi nào dùng                                            |
+| ---------- | ------------ | ----------- | ------------------------------------------------------- |
+| `auto`     | tuỳ browser  | tuỳ browser | Để browser quyết — thường giống `block`                 |
+| `block`    | ~3s          | ∞           | Logo, branding bắt buộc đúng font, chấp nhận text ẩn    |
+| `swap`     | ~100ms       | ∞           | Muốn text hiện ngay, chấp nhận FOUT                     |
+| `fallback` | ~100ms       | ~3s         | Compromise — sau 3s thì thôi, dùng fallback hết session |
+| `optional` | ~100ms       | 0           | **Font chỉ là "nice to have"** — không swap giữa chừng  |
 
 Rule of thumb:
 
@@ -123,9 +123,9 @@ Nếu bắt buộc phải dùng CDN bên ngoài (Google Fonts, Typekit, Bunny Fo
 hãy trả lời 3 câu hỏi mạng **trước** khi CSS parse tới `@font-face`:
 
 ```html
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="dns-prefetch" href="https://fonts.gstatic.com">
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="dns-prefetch" href="https://fonts.gstatic.com" />
 ```
 
 Vì sao cần 2 dòng `preconnect`:
@@ -150,7 +150,7 @@ Preconnect chỉ mở đường. Preload mới là **ra lệnh tải ngay**:
   as="font"
   type="font/woff2"
   crossorigin
->
+/>
 ```
 
 Nguyên tắc:
@@ -242,13 +242,14 @@ webfont **quan trọng nhất lên đầu** stack.
 ## 6. Variable Fonts — 1 file thay vì 8
 
 Thay vì load `Inter-Regular.woff2` + `Inter-Medium.woff2` + `Inter-Bold.woff2`
-+ italic versions = 6 request, dùng **1 file variable** chứa mọi weight:
+
+- italic versions = 6 request, dùng **1 file variable** chứa mọi weight:
 
 ```css
 @font-face {
   font-family: 'Inter';
   src: url('/fonts/inter-var.woff2') format('woff2-variations');
-  font-weight: 100 900;      /* range thay vì single value */
+  font-weight: 100 900; /* range thay vì single value */
   font-style: oblique 0deg 10deg;
   font-display: optional;
 }
@@ -256,10 +257,10 @@ Thay vì load `Inter-Regular.woff2` + `Inter-Medium.woff2` + `Inter-Bold.woff2`
 
 Số liệu thực tế từ [Inter](https://rsms.me/inter/):
 
-| Phương pháp           | Số file | Tổng dung lượng |
-| --------------------- | ------- | --------------- |
-| 6 static woff2        | 6       | ~180 KB         |
-| 1 variable woff2      | 1       | ~90 KB          |
+| Phương pháp      | Số file | Tổng dung lượng |
+| ---------------- | ------- | --------------- |
+| 6 static woff2   | 6       | ~180 KB         |
+| 1 variable woff2 | 1       | ~90 KB          |
 
 Tiết kiệm cả dung lượng **và** số HTTP request — đặc biệt quan trọng trên
 mobile.
@@ -323,7 +324,9 @@ artwork text), dùng CSS Font Loading API:
 ```
 
 ```css
-html.fonts-loading .hero-title { visibility: hidden; }
+html.fonts-loading .hero-title {
+  visibility: hidden;
+}
 ```
 
 Trade-off:
@@ -342,16 +345,20 @@ ngày nay đẹp, đồng nhất, và **0 byte tải xuống, 0 flash**:
 ```css
 body {
   font-family:
-    -apple-system, BlinkMacSystemFont,  /* macOS/iOS */
-    'Segoe UI',                         /* Windows */
-    Roboto,                             /* Android */
-    'Helvetica Neue', Arial, sans-serif;
+    -apple-system,
+    BlinkMacSystemFont,
+    /* macOS/iOS */ 'Segoe UI',
+    /* Windows */ Roboto,
+    /* Android */ 'Helvetica Neue',
+    Arial,
+    sans-serif;
 }
 
-code, pre {
+code,
+pre {
   font-family:
-    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
-    'Liberation Mono', 'Courier New', monospace;
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
+    'Courier New', monospace;
 }
 ```
 
@@ -389,15 +396,17 @@ import { defineConfig, fontProviders } from 'astro/config';
 
 export default defineConfig({
   experimental: {
-    fonts: [{
-      provider: fontProviders.google(),
-      name: 'JetBrains Mono',
-      cssVariable: '--font-mono',
-      weights: [400, 700],
-      styles: ['normal'],
-      subsets: ['latin', 'latin-ext'],
-      fallbacks: ['ui-monospace', 'monospace'],
-    }],
+    fonts: [
+      {
+        provider: fontProviders.google(),
+        name: 'JetBrains Mono',
+        cssVariable: '--font-mono',
+        weights: [400, 700],
+        styles: ['normal'],
+        subsets: ['latin', 'latin-ext'],
+        fallbacks: ['ui-monospace', 'monospace'],
+      },
+    ],
   },
 });
 ```
@@ -406,6 +415,7 @@ export default defineConfig({
 ---
 import { Font } from 'astro:assets';
 ---
+
 <Font cssVariable="--font-mono" preload />
 ```
 
@@ -470,16 +480,16 @@ Apply lần lượt, không cần làm hết:
 
 ## Tóm tắt
 
-| Kỹ thuật                  | Effort | Impact    | Ưu tiên |
-| ------------------------- | ------ | --------- | ------- |
-| `font-display: optional`  | 5 phút | Cao (flash) | 1      |
-| Preconnect + DNS prefetch | 5 phút | Trung bình | 2      |
-| Preload critical font     | 10 phút| Cao (LCP)  | 3      |
-| Self-host                 | 30 phút| Cao        | 4      |
-| Variable font             | 1h     | Trung bình | 5      |
-| Subsetting                | 1–2h   | Cao với CJK| 6      |
-| Metric fallback           | 30 phút| Cao (CLS)  | 7      |
-| Font Loading API          | 1h     | Thấp       | 8      |
+| Kỹ thuật                  | Effort  | Impact      | Ưu tiên |
+| ------------------------- | ------- | ----------- | ------- |
+| `font-display: optional`  | 5 phút  | Cao (flash) | 1       |
+| Preconnect + DNS prefetch | 5 phút  | Trung bình  | 2       |
+| Preload critical font     | 10 phút | Cao (LCP)   | 3       |
+| Self-host                 | 30 phút | Cao         | 4       |
+| Variable font             | 1h      | Trung bình  | 5       |
+| Subsetting                | 1–2h    | Cao với CJK | 6       |
+| Metric fallback           | 30 phút | Cao (CLS)   | 7       |
+| Font Loading API          | 1h      | Thấp        | 8       |
 
 > **Không có viên đạn bạc duy nhất.** Nhưng 3 bước đầu — `font-display: optional`,
 > preconnect, và preload — đã giải quyết ~80% vấn đề cho đa số site.

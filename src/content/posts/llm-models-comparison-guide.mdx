@@ -1,0 +1,441 @@
+---
+title: 'LLM Models Comparison — Claude, GPT, Gemini, Llama — dùng cái nào cho task nào'
+description: '7 dimension đánh giá model LLM, so sánh thực chiến Claude/GPT/Gemini/Llama family đầu 2026, thinking model vs regular, open-source vs proprietary, và decision framework để chọn model đúng task theo chi phí + chất lượng.'
+pubDate: 2026-04-30
+tags: [ai, llm, models, comparison, claude, gpt, gemini, productivity]
+draft: false
+---
+
+"Dùng model nào tốt?" là câu hỏi vô nghĩa — giống "ngôn ngữ lập trình
+nào tốt?". Câu đúng là **"task này model nào hợp?"**. Mỗi model có
+strength khác, cost khác, context window khác.
+
+Bài này là decision framework. Sau khi đọc, bạn chọn model không còn
+theo brand hay hype — mà theo matrix cụ thể: task + budget + latency
+constraint.
+
+---
+
+## 1. Các provider chính đầu 2026
+
+Thị trường LLM đã consolidate thành 5 player chính:
+
+| Provider                       | Family chính                             | Mạnh ở                             |
+| ------------------------------ | ---------------------------------------- | ---------------------------------- |
+| **Anthropic**                  | Claude 3.5 / 3.7 / Sonnet / Haiku / Opus | Code, reasoning, an toàn           |
+| **OpenAI**                     | GPT-4o, GPT-5, o1, o3                    | Generalist, multimodal, reasoning  |
+| **Google**                     | Gemini 2.0 Flash/Pro, Gemini 2.5         | Context window lớn, multimodal sâu |
+| **Meta**                       | Llama 3.3 / 4                            | Open weight, self-host             |
+| **Mistral, DeepSeek, Qwen...** | Open + API                               | Niche use, cost efficient          |
+
+Lưu ý: con số version thay đổi **mỗi 3-6 tháng**. Rule below ưu tiên
+principle hơn tên model cụ thể — principle bền hơn.
+
+---
+
+## 2. 7 dimension đánh giá model
+
+Đừng so 2 model bằng 1 metric duy nhất. Luôn score trên 7 trục:
+
+### 2.1. Reasoning capability
+
+Khả năng logic, multi-step thinking, problem solving. Test bằng:
+
+- Math problem (AIME, GSM8K)
+- Logic puzzle
+- Code debugging chains
+- Research tasks
+
+Thang đo: **MMLU, HumanEval, SWE-Bench, GPQA**. 2026 top:
+
+- Claude 3.7 Sonnet thinking / Claude 4 Opus
+- OpenAI o3 / GPT-5
+- Gemini 2.5 Pro
+
+### 2.2. Code generation quality
+
+Riêng cho code. Benchmark: **HumanEval, MBPP, SWE-Bench, LiveCodeBench**.
+
+2026 top cho code:
+
+- **Claude 3.5/3.7 Sonnet** — consistently best cho real-world code
+  refactor/write
+- **GPT-4o / o3** — mạnh hơn ở competitive programming
+- **DeepSeek-Coder** — open source, tốt cho self-host
+
+### 2.3. Context window
+
+Tổng tokens input + output model xử lý được:
+
+| Model             | Context |
+| ----------------- | ------- |
+| Claude 3.5 family | 200K    |
+| GPT-4o            | 128K    |
+| Gemini 2.0 Flash  | 1M      |
+| Gemini 2.5 Pro    | 2M      |
+| Llama 3.3 70B     | 128K    |
+
+Context to không luôn tốt (xem section 4 — "lost in middle"). Nhưng
+cần cho task **đọc codebase lớn, long document, lịch sử chat dài**.
+
+### 2.4. Speed (TPS)
+
+Tokens per second — ảnh hưởng UX realtime:
+
+| Model                           | TPS trung bình |
+| ------------------------------- | -------------- |
+| Claude 3.5 Haiku                | 150-200        |
+| Claude 3.5 Sonnet               | 60-80          |
+| GPT-4o                          | 80-120         |
+| GPT-4o-mini                     | 120-180        |
+| Gemini 2.0 Flash                | 150-250        |
+| Groq Llama (hardware optimized) | 300-500+       |
+
+### 2.5. Cost
+
+Giá input/output tokens. Đầu 2026 (ước lượng, sẽ thay đổi):
+
+| Model             | Input $/1M | Output $/1M |
+| ----------------- | ---------- | ----------- |
+| Claude 3.5 Sonnet | $3         | $15         |
+| Claude 3.5 Haiku  | $0.8       | $4          |
+| GPT-4o            | $2.5       | $10         |
+| GPT-4o-mini       | $0.15      | $0.6        |
+| o1-preview        | $15        | $60         |
+| Gemini 2.0 Flash  | $0.1       | $0.4        |
+| Gemini 2.0 Pro    | $1.25      | $5          |
+| DeepSeek V3       | $0.27      | $1.1        |
+
+Chênh lệch **100x** giữa rẻ nhất và đắt nhất. Chọn sai → hóa đơn x100.
+
+### 2.6. Multimodal
+
+Xử lý input ngoài text:
+
+| Model       | Image | Audio | Video            |
+| ----------- | ----- | ----- | ---------------- |
+| Claude 3.5  | ✅    | ❌    | ❌               |
+| GPT-4o      | ✅    | ✅    | Frame extraction |
+| Gemini 2.0+ | ✅    | ✅    | Native video     |
+| Llama 3.2+  | ✅    | ❌    | ❌               |
+
+Task frontend: thường chỉ cần **image** (read Figma, screenshot,
+diagram). Mọi top model đều OK.
+
+### 2.7. Agentic capability
+
+Khả năng làm **agent loop**: tool call, planning, multi-step.
+
+- **Claude 3.5/3.7** — top cho coding agent, tool use chính xác, ít
+  hallucinate tool signature.
+- **GPT-4o / GPT-5** — tốt, đôi khi "vội" không thinking trước khi act.
+- **o1/o3** — rất mạnh ở planning nhưng chậm + đắt.
+- **Gemini 2.0+** — cải thiện rõ, tool calling stable.
+
+Cursor default Claude Sonnet cho agent mode có lý do — tool discipline
+tốt.
+
+---
+
+## 3. Thinking models vs Regular models
+
+2024-2025 xuất hiện class mới: **reasoning / thinking models**. Chúng
+được train để **sinh reasoning trace dài** trước khi output, cải thiện
+accuracy cho task khó.
+
+### Đặc điểm
+
+|                             | Regular  | Thinking                         |
+| --------------------------- | -------- | -------------------------------- |
+| Output speed                | Nhanh    | Chậm 5-30s                       |
+| Token cost                  | Thường   | Gấp 5-50x do reasoning tokens    |
+| Correctness on hard tasks   | Baseline | +20-40%                          |
+| Correctness on simple tasks | Baseline | Baseline hoặc tệ hơn (overthink) |
+
+### Top thinking models 2026
+
+- **Claude 3.7 Sonnet (thinking mode)** — có thể set budget thinking
+- **OpenAI o3, o3-mini** — native reasoning
+- **DeepSeek-R1** — open source, chất lượng tốt
+- **Gemini 2.5 Pro (thinking)**
+
+### Khi nào dùng thinking
+
+**Nên dùng:**
+
+- Math / logic / CS problem khó
+- Plan architecture phức tạp
+- Debug race condition / concurrency
+- Strategic decision (tech choice với nhiều trade-off)
+
+**Không nên:**
+
+- Code refactor đơn giản
+- Format conversion
+- Data extraction từ text
+- Conversation nhanh
+
+**Rule of thumb**: task mà junior dev cần 30+ phút nghĩ → dùng thinking.
+Task 5 phút xong → regular.
+
+---
+
+## 4. Open-source vs Proprietary
+
+### Proprietary (Claude, GPT, Gemini)
+
+- **Ưu**: chất lượng top, stable API, ít setup, multimodal, thinking
+  mode.
+- **Nhược**: vendor lock, data privacy concern, cost scale theo use,
+  không control version.
+
+### Open-source (Llama, Mistral, DeepSeek, Qwen)
+
+- **Ưu**: self-host option, control hoàn toàn, không data leak, fine-
+  tune dễ, free (sau infra cost).
+- **Nhược**: chất lượng thua proprietary 6-12 tháng, infra setup phức
+  tạp, cần GPU, không multimodal mạnh bằng.
+
+### Khi nào chọn open-source
+
+- **Data sensitivity**: healthcare, finance, secret IP → self-host
+  bắt buộc.
+- **Scale cực lớn**: triệu request/ngày → tự host rẻ hơn API.
+- **Fine-tuning nặng**: cần adapt model theo domain riêng.
+- **Edge deployment**: run trên device (laptop, phone).
+
+Nếu không match 1 trong 4 → dùng proprietary. Thường hợp lý hơn cho
+99% dev.
+
+### "Open weight" ≠ "Open source" hoàn toàn
+
+Llama, DeepSeek release **weights** (tải về chạy được) nhưng training
+code / data không public. Gọi chính xác là **open weight**. Vẫn hơn
+closed-weight — self-host được, nhưng không reproduce được training.
+
+---
+
+## 5. Decision framework — chọn model theo task
+
+### 5.1. Decision tree
+
+```text
+Task là gì?
+├── Code (refactor, write, debug)
+│    ├── Đơn giản (rename, typo) → Model nhỏ (Haiku, GPT-4o-mini)
+│    ├── Trung bình (feature) → Claude 3.5 Sonnet (mặc định tốt)
+│    └── Phức tạp (architect, deep debug) → Claude thinking / o3
+│
+├── Long context (đọc repo, doc, PDF 100+ pages)
+│    └── Gemini 2.0+ (context window lớn) hoặc Claude 3.5 (200K ok)
+│
+├── Multimodal (image, video)
+│    ├── Image only → Any top model
+│    ├── Video native → Gemini 2.0+
+│    └── Audio → GPT-4o
+│
+├── Cost-sensitive (production app scale)
+│    ├── Quality ưu tiên → GPT-4o-mini / Claude Haiku
+│    └── Quality không critical → DeepSeek / Gemini Flash
+│
+├── Privacy-critical
+│    └── Self-host Llama / Mistral
+│
+└── Research / niche
+     └── Thử mọi model qua OpenRouter, A/B test
+```
+
+### 5.2. Task-model mapping dev frontend
+
+| Task                              | Model đề xuất              | Lý do           |
+| --------------------------------- | -------------------------- | --------------- |
+| Autocomplete inline               | Cursor-supplied (tuned)    | Speed > quality |
+| Chat refactor                     | Claude 3.5 Sonnet          | Balance         |
+| Architecture decision             | Claude 3.7 thinking / o3   | Cần reasoning   |
+| Bulk file processing              | GPT-4o-mini / Gemini Flash | Cost/scale      |
+| PR review                         | Claude 3.5 Sonnet          | Nuance          |
+| Image inspect (Figma, screenshot) | GPT-4o / Gemini 2.0        | Multimodal      |
+| Write blog / docs                 | Claude Opus / GPT-5        | Prose quality   |
+| Quick Q&A                         | Gemini Flash / Haiku       | Cheap + fast    |
+
+### 5.3. Bằng chứng, không hype
+
+Mỗi lần có model mới ra, bạn sẽ nghe "cái này tốt nhất". Đừng tin —
+verify bằng:
+
+- **Benchmark public** (LiveBench, SWE-Bench, Arena leaderboard)
+- **Test task riêng của bạn** — benchmark không cover use case của
+  bạn
+- **Vibe check 1 tuần** — xài thực tế, đếm số lần thất vọng
+
+Model "tốt nhất trên benchmark" không luôn là "tốt nhất cho task bạn".
+
+---
+
+## 6. Strategy mix — dùng nhiều model kết hợp
+
+Pro không chọn 1 model cho mọi thứ. Mix theo layer:
+
+```text
+┌─────────────────────────────────────────┐
+│ Inline autocomplete                     │
+│   Model nhỏ, fast (Cursor default)      │
+├─────────────────────────────────────────┤
+│ Chat / agent main workflow              │
+│   Claude 3.5 Sonnet                     │
+├─────────────────────────────────────────┤
+│ Task phức tạp / reasoning               │
+│   Switch to Claude thinking / o3        │
+├─────────────────────────────────────────┤
+│ Background / bulk task                  │
+│   Gemini Flash / DeepSeek (cost-sensitive) │
+└─────────────────────────────────────────┘
+```
+
+Cursor cho phép set default model + override per chat. Dùng
+linh hoạt, không cố thủ 1 model.
+
+### Router pattern (tự build hoặc qua OpenRouter)
+
+```text
+Request đến →
+  ├── Task type = "code refactor simple" → route Haiku
+  ├── Task type = "debug hard" → route Claude thinking
+  ├── Task type = "bulk rename" → route Flash
+  └── Default → Claude Sonnet
+```
+
+Tối ưu cost 30-50% so với luôn xài 1 model.
+
+---
+
+## 7. Update model — làm thế nào không bị bỏ lại
+
+Tháng 1 lần, kiểm tra:
+
+### 7.1. Benchmark update
+
+- **LMArena** (chatbot arena) — ranking theo vote user
+- **LiveBench** — benchmark chống contamination, update hàng tháng
+- **SWE-Bench** — real GitHub issue, đặc biệt cho coding model
+- **LiveCodeBench** — competitive programming
+
+### 7.2. Provider changelog
+
+- Anthropic: [anthropic.com/news](https://www.anthropic.com/news)
+- OpenAI: [openai.com/news](https://openai.com/news)
+- Google AI: [ai.googleblog.com](https://ai.googleblog.com)
+
+### 7.3. Community sentiment
+
+- r/LocalLLaMA, r/ChatGPT, r/ClaudeAI
+- X/Twitter AI dev community
+- HackerNews AI discussions
+
+### 7.4. Thử trước khi commit
+
+Model mới ra → thử **1 tuần** với task thật, không phải xài vào
+production ngay. Thường 1-2 tuần đầu model mới có bug chưa fix.
+
+---
+
+## 8. Vấn đề thực tế đầu 2026
+
+### 8.1. Benchmark contamination
+
+Model mới ra đạt 95% benchmark X. Tháng sau có người phát hiện
+benchmark X có trong training data → con số vô nghĩa.
+
+**Counter**: ưu tiên benchmark "contamination-resistant" như LiveBench
+(câu hỏi rotate hàng tháng) hoặc test set riêng bạn build.
+
+### 8.2. "Quantized" phiên bản
+
+Self-host model thường dùng quantized (8-bit, 4-bit) → nhỏ hơn,
+fit GPU consumer. Nhưng **chất lượng giảm**:
+
+- `llama-3.3-70b-fp16` = quality đúng
+- `llama-3.3-70b-q4` (4-bit) = quality giảm 5-15%
+
+Đừng confuse model self-host với model full precision. Benchmark báo
+full precision, bạn xài quantized thì không compare được.
+
+### 8.3. Version drift
+
+Provider thỉnh thoảng **update model silently**. "GPT-4" bạn xài
+tháng trước khác "GPT-4" hôm nay. Anthropic tốt hơn ở chỗ version
+rõ ràng (`claude-3-5-sonnet-20241022` — có date suffix).
+
+**Best practice**: production app pin version cụ thể (`claude-3-5-
+sonnet-20241022`), không dùng `claude-3-5-sonnet-latest`.
+
+### 8.4. Rate limit thực tế
+
+Model to không phải ai cũng access được. Tier rate limit của
+Anthropic/OpenAI ràng buộc theo **monthly spend tier**. Startup
+mới có thể chỉ chạy 20 req/phút — không đủ cho production.
+
+Plan: subscription cá nhân cho dev, API tier cho production đủ budget,
+hoặc OpenRouter làm layer fallback.
+
+---
+
+## 9. Tương lai gần (6-12 tháng)
+
+Predictions có căn cứ:
+
+- **Context window** → 10M+ token sẽ bình thường (Google đang dẫn).
+- **Thinking models** → trở thành default cho task khó, không phải
+  option.
+- **Cost giảm** → GPT-4 quality với giá GPT-4o-mini.
+- **Multimodal** → video + audio generation tích hợp.
+- **Agentic capability** → reliability tool use cải thiện rõ (ít lỗi
+  call sai tool).
+- **Open source catch up** → Llama 4, DeepSeek R2 có thể gần
+  proprietary khoảng 3-6 tháng thay vì 12 tháng.
+
+Điều **không chắc**:
+
+- **AGI** — đừng tin ai hứa timeline.
+- **Model X "kill" model Y** — thị trường vẫn có chỗ cho nhiều player.
+- **Pricing** — có thể tăng do infrastructure cost, không chỉ giảm.
+
+---
+
+## 10. Tổng kết
+
+Không có "model tốt nhất" — chỉ có **model tốt nhất cho bạn, cho task,
+cho budget**.
+
+Framework rút gọn:
+
+1. **Identify task**: code? chat? reasoning? long context? multimodal?
+2. **Check 3 constraint**: cost budget? latency cần? privacy cần?
+3. **Pick 2-3 candidate** từ bảng section 5.2.
+4. **Test với task thật** 1 tuần.
+5. **Commit default**, nhưng **switch** khi task đặc thù.
+
+Model mới ra → không vội chuyển. Validate bằng task của bạn, không
+bằng benchmark.
+
+Cuối cùng: **model chỉ là tool**. Dev giỏi với Claude 3.5 > dev dở
+với Claude 4 Opus. Kỹ năng prompt, review, agent workflow (các bài
+trong series trước) ảnh hưởng output chất lượng nhiều hơn chọn model.
+
+---
+
+### Đọc thêm
+
+- [Prompting Fundamentals](/blog/llm-prompting-fundamentals)
+- [Tokens & Pricing](/blog/ai-tokens-and-pricing-explained)
+- [AI Hallucination](/blog/ai-hallucination-and-how-to-spot-it)
+- [Working with Coding Agents](/blog/working-with-coding-agents)
+- [Customizing AI Agents](/blog/customizing-ai-agents)
+
+### Reference & benchmark
+
+- [LMArena](https://lmarena.ai) — user vote ranking
+- [LiveBench](https://livebench.ai) — contamination-resistant benchmark
+- [SWE-Bench](https://www.swebench.com) — real GitHub issue solving
+- [Artificial Analysis](https://artificialanalysis.ai) — cost/speed/
+  quality comparison

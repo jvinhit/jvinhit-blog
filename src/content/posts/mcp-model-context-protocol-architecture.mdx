@@ -104,7 +104,11 @@ File config: `~/Library/Application Support/Claude/claude_desktop_config.json` (
   "mcpServers": {
     "filesystem": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/vince/Documents"]
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/Users/name/Documents"
+      ]
     },
     "weather-remote": {
       "url": "https://api.example.com/mcp",
@@ -150,20 +154,20 @@ File config: `~/.cursor/mcp.json` hoặc qua Settings > MCP
 
 MCP cung cấp 3 loại primitives:
 
-| Loại          | Mô tả                     | Ví dụ                                |
-| ------------- | ------------------------- | ------------------------------------ |
-| **Tools**     | Functions AI có thể gọi   | Tính toán, gọi API, query database   |
-| **Resources** | Data context cho AI       | File contents, database schema       |
-| **Prompts**   | Templates cho interactions | System prompts, few-shot examples    |
+| Loại          | Mô tả                      | Ví dụ                              |
+| ------------- | -------------------------- | ---------------------------------- |
+| **Tools**     | Functions AI có thể gọi    | Tính toán, gọi API, query database |
+| **Resources** | Data context cho AI        | File contents, database schema     |
+| **Prompts**   | Templates cho interactions | System prompts, few-shot examples  |
 
 ---
 
 ## Tóm tắt các loại kết nối
 
-| Loại            | Transport | Cấu hình            | Dùng khi                                       |
-| --------------- | --------- | ------------------- | ---------------------------------------------- |
-| **Local Stdio** | stdio     | `command` + `args`  | Server chạy local, dùng `npx`, `node`, `python` |
-| **Remote HTTP** | HTTP/SSE  | `url` + `headers`   | Server ở cloud/remote, cần authentication       |
+| Loại            | Transport | Cấu hình           | Dùng khi                                        |
+| --------------- | --------- | ------------------ | ----------------------------------------------- |
+| **Local Stdio** | stdio     | `command` + `args` | Server chạy local, dùng `npx`, `node`, `python` |
+| **Remote HTTP** | HTTP/SSE  | `url` + `headers`  | Server ở cloud/remote, cần authentication       |
 
 **Ví dụ command phổ biến:**
 
@@ -308,13 +312,13 @@ MCP cung cấp 3 loại primitives:
 
 ### 4. Giải thích từng thành phần
 
-| Thành phần      | Vai trò                              | Ví dụ                                |
-| --------------- | ------------------------------------ | ------------------------------------ |
-| **MCP Host**    | Ứng dụng AI điều phối mọi thứ        | Claude Desktop, Cursor, VS Code      |
-| **MCP Client**  | Kết nối & giao tiếp với 1 server     | Client object trong code             |
-| **MCP Server**  | Cung cấp tools/resources/prompts     | filesystem server, database server   |
-| **Transport**   | Cách truyền dữ liệu                  | stdio (local), HTTP (remote)         |
-| **Primitives**  | Các loại capability                  | Tools, Resources, Prompts            |
+| Thành phần     | Vai trò                          | Ví dụ                              |
+| -------------- | -------------------------------- | ---------------------------------- |
+| **MCP Host**   | Ứng dụng AI điều phối mọi thứ    | Claude Desktop, Cursor, VS Code    |
+| **MCP Client** | Kết nối & giao tiếp với 1 server | Client object trong code           |
+| **MCP Server** | Cung cấp tools/resources/prompts | filesystem server, database server |
+| **Transport**  | Cách truyền dữ liệu              | stdio (local), HTTP (remote)       |
+| **Primitives** | Các loại capability              | Tools, Resources, Prompts          |
 
 ---
 
@@ -341,7 +345,10 @@ MCP cung cấp 3 loại primitives:
 - Dùng cho cloud services
 
 ```json
-{ "url": "https://api.example.com/mcp", "headers": { "Authorization": "Bearer ..." } }
+{
+  "url": "https://api.example.com/mcp",
+  "headers": { "Authorization": "Bearer ..." }
+}
 ```
 
 ---
@@ -352,13 +359,14 @@ MCP cung cấp 3 loại primitives:
 
 ```jsonc
 {
-  "jsonrpc": "2.0",           // Version
-  "id": 1,                    // Unique ID for tracking
-  "method": "tools/call",     // Method name
-  "params": {                 // Parameters
+  "jsonrpc": "2.0", // Version
+  "id": 1, // Unique ID for tracking
+  "method": "tools/call", // Method name
+  "params": {
+    // Parameters
     "name": "read_file",
-    "arguments": { "path": "/data/config.json" }
-  }
+    "arguments": { "path": "/data/config.json" },
+  },
 }
 ```
 
@@ -389,11 +397,11 @@ MCP cung cấp 3 loại primitives:
 
 ## Tóm tắt
 
-| Layer           | Công nghệ              | Vai trò                                    |
-| --------------- | ---------------------- | ------------------------------------------ |
-| **Application** | Claude/Cursor/Copilot  | UI + LLM orchestration                     |
-| **Data Layer**  | JSON-RPC 2.0           | Định nghĩa messages, tools, resources       |
-| **Transport**   | STDIO / HTTP           | Truyền bytes giữa client và server          |
+| Layer           | Công nghệ             | Vai trò                               |
+| --------------- | --------------------- | ------------------------------------- |
+| **Application** | Claude/Cursor/Copilot | UI + LLM orchestration                |
+| **Data Layer**  | JSON-RPC 2.0          | Định nghĩa messages, tools, resources |
+| **Transport**   | STDIO / HTTP          | Truyền bytes giữa client và server    |
 
 > **MCP giống như USB-C cho AI** — không cần biết thiết bị ngoại vi là gì, chỉ cần cắm vào là chạy.
 

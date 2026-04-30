@@ -1,0 +1,581 @@
+---
+import { Search, X as XIcon } from '@lucide/astro';
+import { withBase } from '~/lib/site-config';
+
+/**
+ * Search modal — global keyword search trên toàn bộ posts.
+ *
+ * Architecture:
+ * - Build time: `/search.json` endpoint render full index (xem
+ *   `src/pages/search.json.ts`).
+ * - Client: lazy fetch index lần đầu user mở dialog, cache trong memory
+ *   suốt session. Mọi query sau đó chạy in-memory → instant.
+ * - UI: native `<dialog>` element → free focus trap + ESC close + backdrop
+ *   từ user-agent, không phải tự build modal a11y.
+ *
+ * Hotkeys: `⌘K` / `Ctrl+K` / `/` mở; `↑↓` di chuyển; `↵` mở post; `ESC` đóng.
+ */
+const indexUrl = withBase('/search.json');
+---
+
+<button
+  type="button"
+  data-search-trigger
+  aria-label="Search posts (press / or ⌘K)"
+  aria-controls="search-dialog"
+  aria-haspopup="dialog"
+  class="inline-flex h-9 cursor-pointer items-center gap-2 rounded-xs border border-[var(--color-border-strong)] bg-transparent px-2 text-[var(--color-fg)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] focus-visible:border-[var(--color-accent)] focus-visible:text-[var(--color-accent)] sm:px-2.5"
+>
+  <Search class="h-4 w-4" aria-hidden="true" />
+  <kbd
+    class="hidden items-center gap-0.5 rounded-xs border border-[var(--color-border)] px-1 py-0.5 font-[inherit] text-[10px] font-semibold tracking-wider text-[var(--color-fg-muted)] md:inline-flex"
+  >
+    <span aria-hidden="true">⌘</span>K
+  </kbd>
+</button>
+
+<dialog
+  id="search-dialog"
+  data-search-dialog
+  aria-labelledby="search-dialog-title"
+  class="mx-auto mt-[20vh] mb-auto w-full max-w-[640px] border border-[var(--color-border-strong)] bg-[var(--color-surface)] p-0 text-[var(--color-fg)] shadow-[0_24px_60px_-12px_rgba(0,0,0,0.7)] backdrop:bg-black/70 backdrop:backdrop-blur-sm sm:rounded-md"
+>
+  <h2 id="search-dialog-title" class="sr-only">Search posts</h2>
+
+  <form
+    role="search"
+    data-search-form
+    class="flex items-center gap-3 border-b border-[var(--color-border)] px-4 py-3"
+  >
+    <Search
+      class="h-4 w-4 shrink-0 text-[var(--color-fg-muted)]"
+      aria-hidden="true"
+    />
+    <input
+      type="search"
+      data-search-input
+      data-index-url={indexUrl}
+      placeholder="Search title, content, or tags..."
+      autocomplete="off"
+      autocapitalize="off"
+      spellcheck="false"
+      enterkeyhint="search"
+      aria-label="Search query"
+      aria-controls="search-results"
+      aria-autocomplete="list"
+      class="w-full bg-transparent font-[inherit] text-sm text-[var(--color-fg)] placeholder:text-[var(--color-fg-subtle)] focus:outline-none [&::-webkit-search-cancel-button]:hidden"
+    />
+    <button
+      type="button"
+      data-search-close
+      aria-label="Close search"
+      class="hidden h-6 cursor-pointer items-center justify-center rounded-xs border border-[var(--color-border)] px-1.5 font-[inherit] text-[10px] font-semibold tracking-wider text-[var(--color-fg-muted)] transition-colors hover:text-[var(--color-fg)] sm:inline-flex"
+    >
+      ESC
+    </button>
+    <button
+      type="button"
+      data-search-close
+      aria-label="Close search"
+      class="inline-flex h-8 w-8 cursor-pointer items-center justify-center text-[var(--color-fg-muted)] transition-colors hover:text-[var(--color-fg)] sm:hidden"
+    >
+      <XIcon class="h-4 w-4" aria-hidden="true" />
+    </button>
+  </form>
+
+  <div
+    id="search-results"
+    data-search-body
+    role="listbox"
+    aria-label="Search results"
+    class="max-h-[60vh] min-h-[120px] overflow-y-auto px-2 py-2"
+  >
+    <p
+      data-search-empty
+      class="px-3 py-8 text-center text-xs text-[var(--color-fg-muted)]"
+    >
+      Type to search across journal entries.
+    </p>
+  </div>
+
+  <footer
+    class="flex flex-wrap items-center justify-end gap-3 border-t border-[var(--color-border)] px-4 py-2 text-[10px] tracking-wider text-[var(--color-fg-subtle)] uppercase"
+  >
+    <span class="hidden items-center gap-1 sm:inline-flex">
+      <kbd class="rounded-xs border border-[var(--color-border)] px-1 font-[inherit]">↑</kbd>
+      <kbd class="rounded-xs border border-[var(--color-border)] px-1 font-[inherit]">↓</kbd>
+      navigate
+    </span>
+    <span class="hidden items-center gap-1 sm:inline-flex">
+      <kbd class="rounded-xs border border-[var(--color-border)] px-1 font-[inherit]">↵</kbd>
+      open
+    </span>
+    <span class="inline-flex items-center gap-1">
+      <kbd class="rounded-xs border border-[var(--color-border)] px-1 font-[inherit]">esc</kbd>
+      close
+    </span>
+  </footer>
+</dialog>
+
+<style is:global>
+  /* Custom mark style cho search highlight — không dùng UA default
+     (yellow on white) vì xung đột với dark theme. */
+  [data-search-body] mark {
+    background-color: color-mix(
+      in oklab,
+      var(--color-accent) 28%,
+      transparent
+    );
+    color: var(--color-fg);
+    padding: 0 1px;
+    border-radius: 2px;
+  }
+
+  /* Active result — drive bằng [data-active="true"] để JS chỉ toggle 1
+     attribute. Tránh `outline` (pop-in/out instant gây cảm giác nháy khi
+     mash arrow keys); thay bằng accent bar trái + bg subtle, transition
+     ngắn (60ms) để keyboard rhythm cảm giác snappy không lag. */
+  [data-search-body] [data-result-link] {
+    transition: background-color 60ms ease-out;
+  }
+  [data-search-body] [data-result-link][data-active='true'] {
+    background-color: var(--color-surface-2);
+  }
+  [data-search-body] [data-result-link][data-active='true']::before {
+    content: '';
+    position: absolute;
+    left: 4px;
+    top: 8px;
+    bottom: 8px;
+    width: 2px;
+    background-color: var(--color-accent);
+    border-radius: 1px;
+  }
+
+  /* Native dialog reset — Tailwind preflight không reset hết. */
+  dialog[data-search-dialog]::backdrop {
+    /* Animation graceful nếu trình duyệt hỗ trợ. */
+    transition: opacity 120ms ease-out;
+  }
+</style>
+
+<script>
+  /**
+   * Search modal controller
+   *
+   * - State: `index` cache full SearchItem[] sau lần fetch đầu; `currentResults`
+   *   là kết quả đang render; `activeIndex` là item đang highlight cho keyboard nav.
+   * - Lazy index load: chỉ fetch khi mở dialog lần đầu → tiết kiệm bandwidth
+   *   cho user không search.
+   * - Debounce 80ms cho input → tránh re-render mỗi keystroke ở query dài.
+   */
+  type SearchItem = {
+    id: string;
+    title: string;
+    description: string;
+    tags: string[];
+    pubDate: string;
+    body: string;
+  };
+
+  type ScoredItem = SearchItem & {
+    score: number;
+    snippet: string;
+  };
+
+  const MAX_RESULTS = 8;
+  const SNIPPET_BEFORE = 60;
+  const SNIPPET_AFTER = 140;
+
+  function init() {
+    const dialog = document.querySelector<HTMLDialogElement>(
+      '[data-search-dialog]'
+    );
+    const trigger = document.querySelector<HTMLButtonElement>(
+      '[data-search-trigger]'
+    );
+    const input = dialog?.querySelector<HTMLInputElement>(
+      '[data-search-input]'
+    );
+    const body = dialog?.querySelector<HTMLElement>('[data-search-body]');
+    const closeButtons = dialog?.querySelectorAll<HTMLButtonElement>(
+      '[data-search-close]'
+    );
+
+    if (!dialog || !trigger || !input || !body) return;
+
+    const indexUrl = input.dataset.indexUrl ?? '/search.json';
+
+    let index: SearchItem[] | null = null;
+    let loadPromise: Promise<SearchItem[]> | null = null;
+    let currentResults: ScoredItem[] = [];
+    let activeIndex = 0;
+    let debounceTimer: number | undefined;
+
+    /* ---------- Index loading ---------- */
+
+    async function loadIndex(): Promise<SearchItem[]> {
+      if (index) return index;
+      if (loadPromise) return loadPromise;
+
+      loadPromise = fetch(indexUrl, { credentials: 'omit' })
+        .then((r) => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json() as Promise<{ items: SearchItem[] }>;
+        })
+        .then((data) => {
+          index = data.items;
+          return index;
+        })
+        .catch((err) => {
+          loadPromise = null;
+          throw err;
+        });
+
+      return loadPromise;
+    }
+
+    /* ---------- Open / close ---------- */
+
+    function open() {
+      if (dialog!.open) return;
+      dialog!.showModal();
+      // Lock body scroll — `<dialog>.showModal` chỉ inert background nhưng
+      // vẫn cho phép scroll. Khoá luôn để tránh background nhảy.
+      document.documentElement.style.overflow = 'hidden';
+      // Pre-warm index ngay khi mở.
+      loadIndex().catch(() => {
+        renderError();
+      });
+      // Focus input ở next frame để chắc chắn dialog đã layout xong.
+      requestAnimationFrame(() => input!.focus());
+    }
+
+    function close() {
+      if (!dialog!.open) return;
+      dialog!.close();
+    }
+
+    trigger.addEventListener('click', open);
+    closeButtons?.forEach((btn) => btn.addEventListener('click', close));
+
+    dialog.addEventListener('close', () => {
+      document.documentElement.style.overflow = '';
+      // Reset query để lần mở sau bắt đầu sạch — phần lớn user expect.
+      input!.value = '';
+      renderEmpty();
+      // Trả focus về trigger cho keyboard user.
+      trigger!.focus({ preventScroll: true });
+    });
+
+    // Click backdrop → đóng. Trong native <dialog>, click vào ::backdrop
+    // bubbles lên dialog với e.target === dialog (vì backdrop là pseudo).
+    dialog.addEventListener('click', (e) => {
+      if (e.target === dialog) close();
+    });
+
+    /* ---------- Global hotkeys ---------- */
+
+    document.addEventListener('keydown', (e) => {
+      const isCmdK =
+        (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k' && !e.altKey;
+      const isSlash =
+        e.key === '/' &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey &&
+        !isTextInputFocused();
+
+      if (isCmdK || isSlash) {
+        e.preventDefault();
+        open();
+      }
+    });
+
+    function isTextInputFocused(): boolean {
+      const ae = document.activeElement;
+      if (!ae) return false;
+      if (ae === input) return true;
+      const tag = ae.tagName;
+      return (
+        tag === 'INPUT' ||
+        tag === 'TEXTAREA' ||
+        (ae as HTMLElement).isContentEditable
+      );
+    }
+
+    /* ---------- Query handling ---------- */
+
+    input.addEventListener('input', () => {
+      window.clearTimeout(debounceTimer);
+      debounceTimer = window.setTimeout(runQuery, 80);
+    });
+
+    async function runQuery() {
+      const q = input!.value.trim();
+      if (!q) {
+        renderEmpty();
+        return;
+      }
+
+      try {
+        const items = await loadIndex();
+        const results = search(items, q);
+        renderResults(results, q);
+      } catch {
+        renderError();
+      }
+    }
+
+    /* ---------- Keyboard nav ---------- */
+
+    input.addEventListener('keydown', (e) => {
+      if (currentResults.length === 0) return;
+
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        moveActive(1);
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        moveActive(-1);
+      } else if (e.key === 'Home') {
+        e.preventDefault();
+        setActive(0);
+      } else if (e.key === 'End') {
+        e.preventDefault();
+        setActive(currentResults.length - 1);
+      } else if (e.key === 'Enter') {
+        const link = body!.querySelector<HTMLAnchorElement>(
+          `[data-result-link][data-index="${activeIndex}"]`
+        );
+        if (link) {
+          e.preventDefault();
+          link.click();
+        }
+      }
+    });
+
+    function moveActive(delta: number) {
+      const next =
+        (activeIndex + delta + currentResults.length) % currentResults.length;
+      setActive(next);
+    }
+
+    function setActive(i: number, opts: { scroll?: boolean } = {}) {
+      const { scroll = true } = opts;
+      activeIndex = i;
+      const links = body!.querySelectorAll<HTMLAnchorElement>(
+        '[data-result-link]'
+      );
+      links.forEach((el, idx) => {
+        const active = idx === i;
+        el.dataset.active = active ? 'true' : 'false';
+        el.setAttribute('aria-selected', active ? 'true' : 'false');
+        if (active && scroll) el.scrollIntoView({ block: 'nearest' });
+      });
+    }
+
+    // Sync pointer hover → activeIndex để chỉ luôn 1 row được highlight
+    // (tránh keyboard active vs mouse hover "đánh nhau"). Dùng `pointermove`
+    // thay `mouseover` để bỏ qua false-trigger khi scrollIntoView() từ
+    // arrow nav đẩy item khác xuống dưới cursor mà mouse không di chuyển.
+    body.addEventListener('pointermove', (e) => {
+      const link = (e.target as HTMLElement).closest<HTMLAnchorElement>(
+        '[data-result-link]'
+      );
+      if (!link) return;
+      const idx = Number(link.dataset.index);
+      if (Number.isNaN(idx) || idx === activeIndex) return;
+      // `scroll: false` — mouse đã ở vị trí đó, scroll thêm sẽ giật.
+      setActive(idx, { scroll: false });
+    });
+
+    /* ---------- Search algorithm ---------- */
+
+    function search(items: SearchItem[], query: string): ScoredItem[] {
+      const tokens = tokenize(query);
+      if (tokens.length === 0) return [];
+
+      const scored: ScoredItem[] = [];
+
+      for (const item of items) {
+        const titleLc = item.title.toLowerCase();
+        const descLc = item.description.toLowerCase();
+        const tagsLc = item.tags.join(' ').toLowerCase();
+        const bodyLc = item.body.toLowerCase();
+
+        let score = 0;
+        let firstBodyMatch = -1;
+        let allMatch = true;
+
+        // AND semantics: mọi token phải match ít nhất 1 field.
+        // Trọng số: title cao nhất (rõ intent) → tags → description → body.
+        for (const tok of tokens) {
+          let tokMatched = false;
+
+          if (titleLc.includes(tok)) {
+            score += 12;
+            tokMatched = true;
+          }
+          if (tagsLc.includes(tok)) {
+            score += 8;
+            tokMatched = true;
+          }
+          if (descLc.includes(tok)) {
+            score += 5;
+            tokMatched = true;
+          }
+
+          const bodyIdx = bodyLc.indexOf(tok);
+          if (bodyIdx >= 0) {
+            score += 1;
+            tokMatched = true;
+            if (firstBodyMatch < 0) firstBodyMatch = bodyIdx;
+          }
+
+          if (!tokMatched) {
+            allMatch = false;
+            break;
+          }
+        }
+
+        if (!allMatch) continue;
+
+        const snippet = makeSnippet(
+          item.body,
+          item.description,
+          firstBodyMatch
+        );
+        scored.push({ ...item, score, snippet });
+      }
+
+      return scored
+        .sort((a, b) => {
+          if (b.score !== a.score) return b.score - a.score;
+          // Tie-breaker: bài mới hơn lên trước.
+          return b.pubDate.localeCompare(a.pubDate);
+        })
+        .slice(0, MAX_RESULTS);
+    }
+
+    function tokenize(q: string): string[] {
+      return q
+        .toLowerCase()
+        .split(/\s+/)
+        .map((t) => t.trim())
+        .filter((t) => t.length > 0);
+    }
+
+    function makeSnippet(
+      bodyText: string,
+      fallback: string,
+      idx: number
+    ): string {
+      if (idx < 0) return fallback;
+      const start = Math.max(0, idx - SNIPPET_BEFORE);
+      const end = Math.min(bodyText.length, idx + SNIPPET_AFTER);
+      const slice = bodyText.slice(start, end);
+      return (
+        (start > 0 ? '…' : '') + slice + (end < bodyText.length ? '…' : '')
+      );
+    }
+
+    /* ---------- Render ---------- */
+
+    function renderEmpty() {
+      currentResults = [];
+      activeIndex = 0;
+      body!.innerHTML = `<p class="px-3 py-8 text-center text-xs text-[var(--color-fg-muted)]">Type to search across journal entries.</p>`;
+    }
+
+    function renderError() {
+      currentResults = [];
+      body!.innerHTML = `<p class="px-3 py-8 text-center text-xs text-[var(--color-accent)]">Failed to load search index. Check your connection and try again.</p>`;
+    }
+
+    function renderResults(items: ScoredItem[], query: string) {
+      currentResults = items;
+      activeIndex = 0;
+
+      if (items.length === 0) {
+        body!.innerHTML = `<p class="px-3 py-8 text-center text-xs text-[var(--color-fg-muted)]">No matches for &quot;<span class="text-[var(--color-fg)]">${escapeHtml(query)}</span>&quot;</p>`;
+        return;
+      }
+
+      const tokens = tokenize(query);
+      const html = items
+        .map((item, i) => {
+          const active = i === 0 ? 'true' : 'false';
+          const tagsHtml = item.tags.length
+            ? `<div class="mt-1.5 flex flex-wrap gap-2 text-[10px] tracking-wider text-[var(--color-fg-subtle)] uppercase">${item.tags
+                .map((t) => `<span>#${escapeHtml(t)}</span>`)
+                .join('')}</div>`
+            : '';
+
+          return `
+            <a
+              role="option"
+              href="${postUrl(item.id)}"
+              data-result-link
+              data-index="${i}"
+              data-active="${active}"
+              aria-selected="${active}"
+              class="relative block rounded-xs px-3 py-2.5 focus:outline-none"
+            >
+              <div class="text-sm font-medium text-[var(--color-fg)]">${highlight(item.title, tokens)}</div>
+              <div class="mt-1 line-clamp-2 text-xs leading-relaxed text-[var(--color-fg-muted)]">${highlight(item.snippet, tokens)}</div>
+              ${tagsHtml}
+            </a>
+          `;
+        })
+        .join('');
+
+      body!.innerHTML = html;
+    }
+
+    function postUrl(id: string): string {
+      // Tự ghép prefix base — withBase chỉ chạy server-side, ở client
+      // ta đã có sẵn `indexUrl` từ data-attribute (đã base-prefixed) →
+      // suy ngược ra base path bằng cách bỏ "/search.json".
+      const base = indexUrl.replace(/\/search\.json$/, '');
+      return `${base}/blog/${encodeURIComponent(id)}/`;
+    }
+
+    /* ---------- HTML helpers ---------- */
+
+    const HTML_ESCAPE: Record<string, string> = {
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+    };
+
+    function escapeHtml(s: string): string {
+      return s.replace(/[&<>"']/g, (c) => HTML_ESCAPE[c] ?? c);
+    }
+
+    function escapeRegex(s: string): string {
+      return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    function highlight(text: string, tokens: string[]): string {
+      const escaped = escapeHtml(text);
+      if (tokens.length === 0) return escaped;
+      const pattern = new RegExp(
+        `(${tokens.map(escapeRegex).join('|')})`,
+        'gi'
+      );
+      return escaped.replace(pattern, '<mark>$1</mark>');
+    }
+
+    /* Initial state */
+    renderEmpty();
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init, { once: true });
+  } else {
+    init();
+  }
+</script>

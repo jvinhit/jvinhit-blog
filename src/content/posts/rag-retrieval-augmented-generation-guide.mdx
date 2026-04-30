@@ -1,0 +1,650 @@
+---
+title: 'RAG — Retrieval Augmented Generation từ A đến Z cho dev'
+description: 'Mổ xẻ RAG: indexing pipeline, embeddings, vector DB, chunking strategies, retrieval (dense/sparse/hybrid), reranking, 8 failure mode phổ biến, và quyết định khi nào dùng RAG vs long context vs fine-tuning.'
+pubDate: 2026-04-30
+tags: [ai, rag, vector-database, embeddings, llm, architecture]
+draft: false
+---
+
+LLM có 2 vấn đề lớn:
+
+1. **Knowledge cutoff** — không biết gì sau training date.
+2. **Không biết private data** — không thể đọc Confluence team bạn,
+   doc nội bộ, codebase company.
+
+**RAG (Retrieval Augmented Generation)** là cách giải quyết phổ biến
+nhất. Thay vì bắt model "nhớ thêm", ta **fetch info liên quan từ
+external source** rồi đưa vào prompt.
+
+Bài này là deep dive RAG — không phải "tutorial 5 phút build chatbot".
+Sau khi đọc, bạn hiểu mọi component, biết khi nào RAG fail, và quyết
+định được: RAG vs long context vs fine-tune.
+
+---
+
+## 1. Vì sao RAG cần thiết
+
+LLM không phải database. Nó học **patterns**, không học **facts** chính
+xác. Hỏi LLM 1 sự kiện cụ thể:
+
+```text
+Q: "Lương trung bình senior dev Hà Nội 2026 là bao nhiêu?"
+A: "Khoảng 35-50 triệu VND/tháng" ← model bịa số dựa trên train data
+                                      cũ, không có guarantee chính xác
+```
+
+LLM không có:
+
+- Báo cáo lương 2026 (training cutoff trước đó)
+- Data nội bộ của company bạn
+- Docs riêng của framework/product mới
+- Conversation history qua nhiều session
+
+RAG fix điều này: **trước khi LLM trả lời, fetch tài liệu liên quan, paste vào prompt**.
+
+```text
+USER: "Lương senior dev VN 2026?"
+
+RAG SYSTEM:
+  1. Search index → tìm doc liên quan
+  2. Top 3 doc:
+     - "Vietnam Tech Salary Report Q1 2026"
+     - "TopDev annual survey 2026"
+     - "Glassdoor scrape 2026-03"
+  3. Inject vào prompt
+
+LLM PROMPT (augmented):
+  System: Bạn trả lời dựa CHỈ trên context bên dưới.
+  Context: <3 doc>
+  User: "Lương senior dev VN 2026?"
+
+LLM A: "Theo Vietnam Tech Salary Report Q1 2026, senior dev tại Hà
+Nội có range 38-55 triệu VND/tháng (median 45M)..." ← grounded
+trên data thực
+```
+
+RAG = **LLM (creative + reasoning) + Search (fact + recency)**. Tận dụng
+strength của cả 2.
+
+---
+
+## 2. Architecture tổng thể
+
+RAG có 2 pipeline tách biệt:
+
+### 2.1. Indexing pipeline (offline, một lần)
+
+```text
+RAW DOCS (PDF, MD, web pages, DB rows)
+    │
+    ▼
+PREPROCESSING (clean, deduplicate, OCR PDF)
+    │
+    ▼
+CHUNKING (chia thành đoạn 200-1000 tokens)
+    │
+    ▼
+EMBEDDING (text → vector 768-3072 chiều)
+    │
+    ▼
+VECTOR DATABASE (lưu vector + metadata)
+```
+
+Chạy 1 lần khi setup, hoặc incremental mỗi khi có doc mới.
+
+### 2.2. Retrieval pipeline (online, mỗi query)
+
+```text
+USER QUERY
+    │
+    ▼
+QUERY EMBEDDING (query → vector cùng không gian)
+    │
+    ▼
+VECTOR SEARCH (top-K nearest neighbors)
+    │
+    ▼
+RERANKING (chọn top-N relevant nhất)
+    │
+    ▼
+PROMPT BUILDING (system prompt + context + query)
+    │
+    ▼
+LLM GENERATE
+    │
+    ▼
+ANSWER (kèm citation)
+```
+
+Mỗi query mất 200-500ms cho retrieval + LLM time (5-30s).
+
+---
+
+## 3. Embeddings — text thành vector như thế nào
+
+**Embedding** = mapping từ text → vector (mảng số float). Vector đại
+diện **ý nghĩa semantic** của text.
+
+### 3.1. Tính chất
+
+```text
+"con mèo" → [0.23, -0.81, 0.55, ..., 0.12]  (768 chiều)
+"mèo nhà" → [0.21, -0.79, 0.58, ..., 0.10]  (gần "con mèo")
+"xe đạp"  → [-0.91, 0.34, -0.22, ..., 0.67] (xa "con mèo")
+```
+
+Distance trong không gian = inverse semantic similarity. Cosine
+similarity là metric phổ biến nhất:
+
+```text
+cos_sim(A, B) = (A · B) / (|A| × |B|)
+
+  +1.0 → identical meaning
+   0.0 → unrelated
+  -1.0 → opposite meaning
+```
+
+### 3.2. Embedding model phổ biến
+
+| Model                  | Provider    | Dimensions | Cost (per 1M)    | Note                    |
+| ---------------------- | ----------- | ---------- | ---------------- | ----------------------- |
+| text-embedding-3-large | OpenAI      | 3072       | $0.13            | Mạnh, phổ biến          |
+| text-embedding-3-small | OpenAI      | 1536       | $0.02            | Cheap, dùng default     |
+| voyage-3               | Voyage AI   | 1024       | $0.06            | Top benchmark           |
+| Cohere embed-v3        | Cohere      | 1024       | $0.10            | Hỗ trợ multilingual tốt |
+| BGE-large-en-v1.5      | BAAI (open) | 1024       | Free (self-host) | OSS top                 |
+| nomic-embed-text-v1.5  | Nomic       | 768        | Free             | Tiny, fast              |
+
+**Cho dev VN**: model multilingual (Cohere, voyage, BGE-multilingual)
+hoạt động OK cho tiếng Việt. OpenAI đủ tốt cho 80% case.
+
+### 3.3. Trade-off dimension
+
+- **Cao (3072)**: nhiều thông tin, retrieval chính xác hơn, **đắt
+  storage + slow search**.
+- **Thấp (768)**: storage rẻ, search nhanh, **mất nuance**.
+
+OpenAI v3 hỗ trợ "Matryoshka" — truncate được dimension lúc query
+(3072 → 1024 nếu cần). Linh hoạt.
+
+---
+
+## 4. Chunking — chia doc thành miếng
+
+Tại sao cần chunking? Vì:
+
+1. Embedding model có **max input** (~8K token). Doc lớn quá → bỏ.
+2. **Granularity**: search "chunk chứa định nghĩa X" hiệu quả hơn "doc
+   100 trang chứa X".
+3. **Context budget LLM**: chỉ retrieve 3-5 chunk vào prompt, không
+   thể full doc.
+
+### 4.1. Chunking strategies
+
+**Fixed-size** (đơn giản nhất):
+
+```text
+Chunk size: 500 tokens
+Overlap: 50 tokens
+
+doc = [t1, t2, ..., t10000]
+chunks = [
+  doc[0:500],
+  doc[450:950],
+  doc[900:1400],
+  ...
+]
+```
+
+Nhược: cắt giữa câu, mất context.
+
+**Recursive** (LangChain default):
+
+```text
+1. Try split by "\n\n" (paragraph)
+2. If chunk too big, split by "\n" (line)
+3. If still too big, split by ". " (sentence)
+4. If still too big, split by " " (word)
+```
+
+Tôn trọng cấu trúc doc.
+
+**Semantic chunking** (modern):
+
+```text
+1. Embed mỗi câu
+2. Tính cosine sim giữa câu liền nhau
+3. Tạo break point khi sim drop
+```
+
+Mỗi chunk là 1 idea coherent. Tốt nhất, đắt nhất.
+
+**Document-aware**:
+
+- Markdown: chunk theo `##` heading
+- Code: chunk theo function / class boundary
+- HTML: chunk theo `<section>`, `<h2>`
+- PDF: chunk theo page, section title
+
+### 4.2. Chunk size — magic number?
+
+| Use case                          | Chunk size                     | Reason                      |
+| --------------------------------- | ------------------------------ | --------------------------- |
+| Q&A factoid ngắn                  | 200-400 token                  | Granular, focused           |
+| Conceptual explanation            | 500-1000 token                 | Đủ ngữ cảnh                 |
+| Code search                       | 100-500 token (function level) | Match developer expectation |
+| Long document (legal, scientific) | 800-1500 token                 | Concept dài                 |
+
+**Overlap** thường 10-20% chunk size. Quá nhiều → duplicate noise.
+Quá ít → mất ngữ cảnh boundary.
+
+### 4.3. Metadata — quan trọng không kém content
+
+Mỗi chunk lưu kèm metadata:
+
+```json
+{
+  "id": "doc_42_chunk_3",
+  "content": "RAG architecture has two pipelines...",
+  "embedding": [0.23, ...],
+  "metadata": {
+    "source": "/docs/rag-guide.md",
+    "title": "RAG Guide",
+    "section": "Architecture",
+    "url": "https://...",
+    "author": "vince",
+    "createdAt": "2026-04-30",
+    "language": "vi"
+  }
+}
+```
+
+Metadata cho phép **filter trước retrieval**:
+
+```text
+query = "RAG architecture"
+filter = { language: "vi", createdAt > "2025-01-01" }
+→ chỉ search trong subset relevant
+```
+
+---
+
+## 5. Vector databases
+
+Vector DB chuyên lưu + search vector. So với SQL/Postgres thường:
+
+### 5.1. So sánh các option
+
+| DB                  | Type               | Best for                   |
+| ------------------- | ------------------ | -------------------------- |
+| **Pinecone**        | Managed cloud      | Production scale, zero-ops |
+| **Weaviate**        | Open + cloud       | Hybrid search built-in     |
+| **Qdrant**          | Open + cloud       | Performance, Rust-based    |
+| **Chroma**          | Open, lightweight  | Prototype, local dev       |
+| **pgvector**        | Postgres extension | Đã có Postgres, ít data    |
+| **Milvus**          | Open, large scale  | Billion-vector level       |
+| **Lance / LanceDB** | Open, local-first  | Embedded, on-device        |
+| **Redis (vector)**  | Cache + vector     | Hybrid cache + search      |
+
+Cho startup: **pgvector** + Postgres existing = đủ cho < 10M chunk.
+Khi scale: chuyển Pinecone / Qdrant / Milvus.
+
+### 5.2. ANN — tại sao không exact search
+
+Exact search vector trên 10M chunk = O(N) query → chậm.
+
+Vector DB dùng **ANN (Approximate Nearest Neighbor)**:
+
+- HNSW (Hierarchical Navigable Small World)
+- IVF (Inverted File Index)
+- LSH (Locality-Sensitive Hashing)
+
+Trade-off **speed vs recall**:
+
+- Recall 99% → tốc độ tốt
+- Recall 95% → 10x nhanh hơn
+- Recall 90% → 50x nhanh hơn
+
+Production thường tune: 95-98% recall, latency < 50ms.
+
+---
+
+## 6. Retrieval strategies
+
+### 6.1. Dense retrieval (vector-based)
+
+Standard. Embed query → vector search → top-K.
+
+**Strength**: hiểu semantic. "lập trình viên" và "developer" gần nhau.
+**Weakness**: bỏ qua exact keyword. "AB-1234 product code" có thể bị
+miss vì embedding không capture identifier.
+
+### 6.2. Sparse retrieval (BM25 / keyword)
+
+Truyền thống. TF-IDF, BM25.
+
+**Strength**: exact match keyword, identifier, code.
+**Weakness**: không hiểu semantic. "auto" không match "automatic".
+
+### 6.3. Hybrid (dense + sparse)
+
+Kết hợp. Mỗi candidate có 2 score, weighted sum:
+
+```text
+final_score = α × dense_score + (1 - α) × sparse_score
+```
+
+α = 0.5-0.7 thường tốt nhất.
+
+Weaviate, Qdrant, Pinecone đều hỗ trợ hybrid native. **Mọi production
+RAG nên dùng hybrid**, đừng chỉ dense.
+
+### 6.4. Multi-query expansion
+
+Trước khi search, dùng LLM expand query:
+
+```text
+Original: "fix bug login"
+
+Expansion (LLM):
+- "authentication error troubleshooting"
+- "login flow issue"
+- "user signin debugging"
+
+Search với cả 4 query, merge result.
+```
+
+Cải thiện recall. Đổi lại 1 LLM call thêm.
+
+### 6.5. HyDE (Hypothetical Document Embeddings)
+
+Trick clever:
+
+```text
+1. LLM generate "hypothetical answer" cho query
+2. Embed answer (không phải query)
+3. Search với embedding answer
+```
+
+Vì "answer" có vocabulary giống doc thực hơn "query".
+
+---
+
+## 7. Reranking
+
+Top-K từ vector search ≠ top-K relevant. Reranking là **2nd pass** với
+model chuyên relevance scoring.
+
+### 7.1. Cross-encoder reranker
+
+Vector search trả 50 candidate → cross-encoder rank lại → top 5.
+
+Cross-encoder evaluate **(query, document)** pair cùng lúc, tốt hơn
+embed độc lập.
+
+Models:
+
+- **Cohere Rerank** (API, $2 / 1K query)
+- **BGE-reranker** (open, self-host)
+- **MS-MARCO** (open, baseline)
+
+### 7.2. LLM-as-reranker
+
+Dùng LLM trực tiếp:
+
+```text
+Prompt: "Cho query Q và 10 doc, rank theo relevance, output JSON
+[id1, id2, ...]"
+```
+
+Đắt nhưng chính xác cao nhất.
+
+### 7.3. Khi nào nên rerank
+
+- High-stakes query (legal, medical, security)
+- Top result phải đúng nhất (single result UI)
+- User thấy rõ quality khác biệt
+
+Skip rerank khi: chat thông thường, prototype, latency-sensitive.
+
+---
+
+## 8. Prompt building — đưa context vào prompt
+
+Sau retrieval, build prompt:
+
+```text
+SYSTEM:
+You are a helpful assistant. Answer based ONLY on the context below.
+If context doesn't contain answer, say "I don't have info about this".
+
+CONTEXT:
+[1] (source: rag-guide.md)
+RAG architecture has two pipelines: indexing and retrieval...
+
+[2] (source: vector-db-comparison.md)
+Pinecone is a managed vector database...
+
+[3] (source: chunking-strategies.md)
+Recursive chunking respects document structure...
+
+QUESTION: {user_query}
+```
+
+### Best practice
+
+1. **Cite sources**: `[1]`, `[2]` để model reference.
+2. **System prompt strict**: "ONLY based on context", chặn hallucinate.
+3. **Order matters**: chunk relevant nhất → đầu hoặc cuối (lost in
+   middle).
+4. **Limit chunks**: 3-5 chunk thường đủ. 10+ → noise tăng.
+5. **Show metadata**: title, source URL → giúp model verify + user
+   trust.
+
+---
+
+## 9. 8 failure mode phổ biến của RAG
+
+### 9.1. Retrieved chunks irrelevant
+
+Symptom: top-K toàn về chủ đề khác.
+
+Fix: better embedding model, hybrid retrieval, query expansion.
+
+### 9.2. Relevant info trong chunk nhưng cắt mất
+
+Symptom: chunk chứa câu A, info đầy đủ ở câu A+B.
+
+Fix: tăng chunk size, tăng overlap, semantic chunking.
+
+### 9.3. Chunk có info nhưng LLM không dùng
+
+Symptom: chunk có đáp án, model vẫn "I don't know".
+
+Fix: prompt rõ hơn ("answer based on context"), đặt context gần query
+(cuối prompt).
+
+### 9.4. LLM hallucinate dù có context
+
+Symptom: model bịa, không cite, hoặc cite sai.
+
+Fix:
+
+- System prompt strict mode
+- Force citation format `[ref]`
+- Lower temperature (T=0.1-0.3)
+- Smaller top-K (3 thay vì 10)
+
+Đọc thêm: [AI Hallucination](/blog/ai-hallucination-and-how-to-spot-it).
+
+### 9.5. Cold start — chưa có doc
+
+User join system, không có doc cá nhân hóa → retrieval rỗng.
+
+Fix:
+
+- Fallback to LLM general knowledge
+- Onboarding flow để upload doc
+- Pre-populate với public knowledge base
+
+### 9.6. Stale data
+
+Doc update, embedding cũ chưa rebuild → retrieve info outdated.
+
+Fix:
+
+- Incremental indexing pipeline
+- TTL trên metadata, expire chunk cũ
+- Webhook khi source update
+
+### 9.7. Multilingual mismatch
+
+Query tiếng Việt, doc tiếng Anh → embedding không gần.
+
+Fix:
+
+- Multilingual embedding model (Cohere, BGE-m3)
+- Translate query trước retrieval
+- Index doc với cả 2 ngôn ngữ
+
+### 9.8. "Lost in the middle"
+
+Retrieve 10 chunk → LLM miss chunk ở giữa.
+
+Fix:
+
+- Top-K nhỏ (3-5)
+- Order chunk relevant đặt đầu hoặc cuối
+- Reranking để chắc chắn quality top
+
+---
+
+## 10. RAG vs Long Context vs Fine-tuning — chọn cái nào
+
+3 cách thêm knowledge cho LLM:
+
+### Long context (paste all into prompt)
+
+```text
+System: <300K token toàn bộ doc>
+User: <query>
+```
+
+**Ưu**: đơn giản nhất, không infrastructure.
+**Nhược**: cost cao mỗi query (300K input × giá), "lost in middle",
+giới hạn context window.
+
+**Dùng khi**: doc < 100K token, query không nhiều, prototype.
+
+### RAG
+
+**Ưu**: scale tốt (1M+ doc), cost-effective query, citation rõ.
+**Nhược**: setup phức tạp, có failure mode, latency thêm.
+
+**Dùng khi**: doc lớn, nhiều query, cần citation, cần update thường
+xuyên.
+
+### Fine-tuning
+
+Train model adapter (LoRA) trên data của bạn.
+
+**Ưu**: model "internalize" knowledge, không cần retrieval.
+**Nhược**: cost upfront cao, khó update (cần retrain), ít transparent.
+
+**Dùng khi**: data ổn định, style consistency quan trọng (vd brand
+voice), data nhỏ < 1000 example.
+
+Đọc thêm: [Fine-tuning Basics](/blog/fine-tuning-llm-basics).
+
+### Decision matrix
+
+| Tình huống                               | Recommend       |
+| ---------------------------------------- | --------------- |
+| Q&A trên doc của bạn                     | RAG             |
+| Style / tone consistency (chatbot brand) | Fine-tune       |
+| Knowledge update thường xuyên            | RAG             |
+| Doc nhỏ, query ít, prototype             | Long context    |
+| Combination: style + dynamic knowledge   | Fine-tune + RAG |
+| Code search trong codebase               | RAG (hybrid)    |
+| Compliance — phải cite source            | RAG             |
+
+---
+
+## 11. Production checklist
+
+Trước khi deploy RAG production, kiểm tra:
+
+```text
+INDEXING
+☐ Source data validated (no garbage, OCR fail, encoding issue)
+☐ Chunking strategy chọn đúng cho data type
+☐ Metadata đầy đủ (source, date, language, author)
+☐ Incremental indexing pipeline (handle update)
+☐ Embedding model fixed version (không drift)
+
+RETRIEVAL
+☐ Hybrid search (dense + sparse)
+☐ Reranking cho high-stake query
+☐ Filter by metadata
+☐ Caching layer (cùng query lặp)
+
+PROMPT
+☐ System prompt strict (no hallucinate)
+☐ Citation format enforced
+☐ Top-K = 3-5 chunk
+☐ Context fit trong window
+
+EVAL
+☐ Eval set 100+ query với ground truth
+☐ Measure: recall@K, precision, MRR
+☐ A/B test khi đổi component
+☐ User feedback loop
+
+PRODUCTION
+☐ Latency budget (P99 < 3s)
+☐ Cost budget per query
+☐ Monitoring: retrieval miss rate, hallucination rate
+☐ Audit trail (log query, retrieved, response)
+☐ PII handling (don't index secret)
+☐ Access control (user A không thấy doc của user B)
+```
+
+---
+
+## 12. Tổng kết
+
+RAG không phải magic. Nó là 1 system **search + LLM** xếp với nhau.
+Mỗi component có trade-off, có failure mode.
+
+5 điều quan trọng nhất:
+
+1. **Chunking + embedding model = nền tảng**. Chọn sai → cứu không
+   nổi sau.
+2. **Hybrid retrieval > pure dense**. Đừng skip BM25.
+3. **Reranking đáng giá** cho production. Cohere Rerank rẻ.
+4. **Prompt strict + citation** giảm hallucinate đáng kể.
+5. **Eval set** quan trọng. Không có eval = không biết RAG đang work.
+
+RAG là 1 trong những áp dụng practical nhất của LLM cho dev hôm nay.
+Build chatbot trên doc nội bộ, AI search cho codebase, helpdesk
+intelligent — đều là RAG.
+
+Hiểu sâu, build chắc — không over-engineer, không dùng framework như
+"black box".
+
+---
+
+### Đọc thêm
+
+- [Tokens & Pricing](/blog/ai-tokens-and-pricing-explained)
+- [LLM Models Comparison](/blog/llm-models-comparison-guide)
+- [Agent Architecture](/blog/agent-architecture-deep-dive)
+- [Fine-tuning LLM Basics](/blog/fine-tuning-llm-basics)
+- [AI Hallucination](/blog/ai-hallucination-and-how-to-spot-it)
+
+### Reference
+
+- "Retrieval-Augmented Generation" — Lewis et al. 2020 (paper gốc)
+- "Lost in the Middle" — Liu et al. 2023
+- LangChain RAG documentation
+- Anthropic — "Contextual Retrieval" (kỹ thuật add context khi chunk)

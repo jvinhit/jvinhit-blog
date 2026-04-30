@@ -70,13 +70,13 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read       # đọc repo
-  pages: write         # deploy lên Pages
-  id-token: write      # OIDC token để auth với Pages API
+  contents: read # đọc repo
+  pages: write # deploy lên Pages
+  id-token: write # OIDC token để auth với Pages API
 
 concurrency:
   group: pages
-  cancel-in-progress: false  # KHÔNG cancel deploy đang chạy
+  cancel-in-progress: false # KHÔNG cancel deploy đang chạy
 
 jobs:
   build:
@@ -185,39 +185,39 @@ Artifact ──► Pages deployment storage ──► CDN edge nodes
 
 ### Pages site
 
-| Giới hạn                   | Mức                              | Ghi chú                                     |
-| -------------------------- | -------------------------------- | ------------------------------------------- |
-| **Site size (published)**  | **≤ 1 GB** recommended           | Soft limit                                  |
-| **File size (per file)**   | **≤ 100 MB**                     | **Hard limit** — file lớn hơn không serve   |
-| **Bandwidth**              | **~100 GB / tháng**              | Soft. Vượt cao: throttle                    |
-| **Builds (Jekyll legacy)** | 10 builds / giờ                  | Không áp với Actions mode                   |
-| **Custom domain**          | 1 CNAME                          | HTTPS auto qua Let's Encrypt                |
+| Giới hạn                   | Mức                    | Ghi chú                                   |
+| -------------------------- | ---------------------- | ----------------------------------------- |
+| **Site size (published)**  | **≤ 1 GB** recommended | Soft limit                                |
+| **File size (per file)**   | **≤ 100 MB**           | **Hard limit** — file lớn hơn không serve |
+| **Bandwidth**              | **~100 GB / tháng**    | Soft. Vượt cao: throttle                  |
+| **Builds (Jekyll legacy)** | 10 builds / giờ        | Không áp với Actions mode                 |
+| **Custom domain**          | 1 CNAME                | HTTPS auto qua Let's Encrypt              |
 
 ### GitHub Actions (nơi workflow chạy)
 
-| Giới hạn                        | Free (public repo)          | Free (private repo)         |
-| ------------------------------- | --------------------------- | --------------------------- |
-| **Minutes Actions / tháng**     | **∞** (unlimited)           | 2,000 phút                  |
-| **Concurrent jobs**             | 20                          | 20                          |
-| **Job timeout**                 | 6 giờ                       | 6 giờ                       |
-| **Artifact storage**            | 500 MB                      | 500 MB                      |
-| **Artifact retention default**  | 90 ngày                     | 90 ngày                     |
-| **Pages artifact retention**    | **1 ngày** (đặc biệt)       | 1 ngày                      |
-| **Max artifact size**           | 10 GB / artifact            | 10 GB / artifact            |
+| Giới hạn                       | Free (public repo)    | Free (private repo) |
+| ------------------------------ | --------------------- | ------------------- |
+| **Minutes Actions / tháng**    | **∞** (unlimited)     | 2,000 phút          |
+| **Concurrent jobs**            | 20                    | 20                  |
+| **Job timeout**                | 6 giờ                 | 6 giờ               |
+| **Artifact storage**           | 500 MB                | 500 MB              |
+| **Artifact retention default** | 90 ngày               | 90 ngày             |
+| **Pages artifact retention**   | **1 ngày** (đặc biệt) | 1 ngày              |
+| **Max artifact size**          | 10 GB / artifact      | 10 GB / artifact    |
 
 > Public repo → **Actions minutes unlimited**. Build 1 phút × 100 deploy/tháng
 > = không bao giờ lo.
 
 ### Khi nào bạn cần lo?
 
-| Dấu hiệu                              | Bạn có cần lo?                           |
-| ------------------------------------- | ---------------------------------------- |
-| Site < 100 MB                         | Không                                    |
-| Site 100 MB – 1 GB                    | Bắt đầu optimize ảnh/font                |
-| Site > 1 GB                           | GitHub có thể email cảnh báo             |
-| File đơn > 100 MB                     | Không serve được → tách / offload        |
-| Bandwidth > 100 GB/tháng              | Cân nhắc Cloudflare proxy trước GH Pages |
-| Build > 10 phút                       | Xem lại toolchain (cache, parallel)      |
+| Dấu hiệu                 | Bạn có cần lo?                           |
+| ------------------------ | ---------------------------------------- |
+| Site < 100 MB            | Không                                    |
+| Site 100 MB – 1 GB       | Bắt đầu optimize ảnh/font                |
+| Site > 1 GB              | GitHub có thể email cảnh báo             |
+| File đơn > 100 MB        | Không serve được → tách / offload        |
+| Bandwidth > 100 GB/tháng | Cân nhắc Cloudflare proxy trước GH Pages |
+| Build > 10 phút          | Xem lại toolchain (cache, parallel)      |
 
 ---
 
@@ -293,16 +293,16 @@ chưa có cache npm.
 
 GH Pages tuyệt vời cho **static site**. Nhưng có ngưỡng:
 
-| Nếu cần...                            | Migrate sang...                           |
-| ------------------------------------- | ----------------------------------------- |
-| Server-side rendering (SSR)           | Cloudflare Pages, Vercel, Netlify         |
-| Edge functions / API routes           | Cloudflare Pages, Vercel                  |
-| Preview deployment per PR             | Cloudflare Pages, Vercel, Netlify         |
-| Redirect rules phức tạp               | Cloudflare Pages (`_redirects`)           |
-| Custom HTTP headers (CSP, HSTS)       | Cloudflare, Netlify (`_headers`)          |
-| Image optimization runtime            | Vercel, Cloudflare Images                 |
-| Analytics built-in                    | Vercel Analytics, Cloudflare Web Analytics|
-| Password protection                   | Netlify, Cloudflare Access                |
+| Nếu cần...                      | Migrate sang...                            |
+| ------------------------------- | ------------------------------------------ |
+| Server-side rendering (SSR)     | Cloudflare Pages, Vercel, Netlify          |
+| Edge functions / API routes     | Cloudflare Pages, Vercel                   |
+| Preview deployment per PR       | Cloudflare Pages, Vercel, Netlify          |
+| Redirect rules phức tạp         | Cloudflare Pages (`_redirects`)            |
+| Custom HTTP headers (CSP, HSTS) | Cloudflare, Netlify (`_headers`)           |
+| Image optimization runtime      | Vercel, Cloudflare Images                  |
+| Analytics built-in              | Vercel Analytics, Cloudflare Web Analytics |
+| Password protection             | Netlify, Cloudflare Access                 |
 
 **Cloudflare Pages** là drop-in replacement gần nhất:
 
@@ -331,6 +331,7 @@ bản cũ.
 **Q: Tốc độ load so với Vercel/Cloudflare?**
 A: GH Pages dùng Fastly CDN — nhanh, nhưng **cache headers ngắn (~10 phút)**
 và **không control được**. CF/Vercel cho tune cache aggressive hơn. Với blog
+
 < 10k req/tháng thì user không cảm nhận khác biệt.
 
 **Q: HTTPS có auto không?**

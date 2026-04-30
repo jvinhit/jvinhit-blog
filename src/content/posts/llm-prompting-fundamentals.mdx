@@ -1,0 +1,547 @@
+---
+title: 'Prompting Fundamentals — Từ câu hỏi mơ hồ đến instruction LLM thực sự hiểu'
+description: '3 tầng của prompt (system/user/assistant), 6 nguyên tắc viết prompt hiệu quả, sampling parameters (temperature, top-p, top-k, stopping criteria), personalization qua system prompt, multi-turn strategy, và template tái dùng cho dev.'
+pubDate: 2026-04-30
+tags: [ai, llm, prompt-engineering, productivity, workflow]
+draft: false
+---
+
+"Prompt engineering" nghe như nghề thời thượng 2023 giờ nhiều người cười:
+"cần gì engineer, gõ câu hỏi là xong". Sự thật ở giữa. Gõ câu hỏi là đủ
+cho task đơn giản. Nhưng với task khó — code nghiêm túc, debug sâu,
+architecture decision — cách bạn viết prompt **quyết định 50% chất
+lượng output**.
+
+Bài này là nền tảng. Không có mẹo "10 prompt magic". Chỉ có nguyên tắc,
+parameter, template — đủ để bạn thoát khỏi giai đoạn "đoán prompt".
+
+---
+
+## 1. Prompt không phải chỉ text input
+
+Với API LLM, 1 request gồm **3 roles** của message:
+
+```text
+┌─────────────────────────────────────────────────┐
+│  System message                                 │
+│  Set context, personality, constraint của model  │
+├─────────────────────────────────────────────────┤
+│  User message 1                                 │
+│  Câu hỏi đầu tiên                                │
+├─────────────────────────────────────────────────┤
+│  Assistant message 1                            │
+│  Response của model                              │
+├─────────────────────────────────────────────────┤
+│  User message 2                                 │
+│  Câu hỏi tiếp theo (có context 2 lượt trên)     │
+└─────────────────────────────────────────────────┘
+```
+
+### System message — bộ khung bất biến
+
+Set 1 lần, áp dụng toàn conversation. Dùng cho:
+
+- Vai trò model (`You are a senior TypeScript engineer`).
+- Constraint (`Never suggest deprecated APIs`).
+- Format output (`Always respond in markdown`).
+- Persona (`Use concise technical tone`).
+
+Trong Cursor, **Rules** + **Skills** được inject thành system message.
+Đó là lý do chúng "bền" qua mọi chat.
+
+### User message — câu hỏi thật
+
+Phần biến đổi mỗi lượt. Nơi bạn hỏi, mô tả task, paste code, attach
+file.
+
+### Assistant message — context memory
+
+Model không "nhớ" bạn là ai. Mọi context là **text trong message
+history**. Mỗi response cũ của model trở thành 1 assistant message,
+được replay lại với request mới.
+
+Conversation dài → history dài → **cost scale theo**.
+
+---
+
+## 2. 6 nguyên tắc viết prompt hiệu quả
+
+### 2.1. Specificity — càng cụ thể càng tốt
+
+```text
+❌ "Refactor hàm này cho tốt hơn"
+   → Model đoán "tốt hơn" nghĩa là gì → random direction
+
+✅ "Refactor hàm X theo 3 tiêu chí:
+    1. Extract validation logic thành helper riêng
+    2. Early return khi invalid thay vì nested if
+    3. Add JSDoc với @param và @returns"
+   → Model có tiêu chí objective → output predictable
+```
+
+### 2.2. Context — cung cấp đủ, không thiếu không thừa
+
+```text
+❌ "Code này có bug không?"
+   + [paste 500 dòng]
+
+→ Model search bug ngẫu nhiên, miss vì context quá rộng.
+
+✅ "Function calculateTax (file @tax.ts line 45-67) trả về wrong value
+    cho input negative. Test fail: @tax.test.ts:23.
+    Expected behavior: throw on negative input.
+    Check function này có validate input đúng không?"
+```
+
+Scope hẹp → AI focus đúng chỗ.
+
+### 2.3. Output format — define trước khi gen
+
+```text
+❌ "List các framework CSS"
+
+✅ "List 5 framework CSS, format:
+    | Framework | Use case | Bundle size | Maturity |
+    |-----------|----------|-------------|----------|
+    Không text giải thích ngoài bảng."
+```
+
+Define format = tiết kiệm token + ít rewrite.
+
+### 2.4. Examples — show don't tell
+
+Với task không chuẩn (format mới, style riêng), cho 1-2 example:
+
+```text
+"Chuyển commit message sang conventional format.
+
+Input:  'Added login button to header'
+Output: 'feat(header): add login button'
+
+Input:  'Fixed date display in reports'
+Output: 'fix(reports): correct date display'
+
+Now convert: 'Updated README with setup instructions'"
+```
+
+Đây là **few-shot learning** — kỹ thuật cơ bản nhưng hiệu quả nhất.
+
+### 2.5. Constraint — nói rõ KHÔNG làm gì
+
+```text
+"Refactor component này.
+
+CONSTRAINTS:
+- KHÔNG đổi public props API
+- KHÔNG add dependency mới
+- KHÔNG đụng file test hiện có
+- KHÔNG dùng useEffect với empty deps (codebase ban)
+```
+
+AI thường "helpful" quá mức — tự ý mở rộng scope. Constraint cứng chặn
+việc này.
+
+### 2.6. Role — gán vai phù hợp
+
+```text
+"You are a security engineer reviewing code for production banking app.
+Review @login.ts with focus on:
+- Authentication bypass
+- Timing attack
+- Token leakage
+- Error handling revealing info"
+```
+
+Role kích hoạt pattern phù hợp trong training data. "Security engineer"
+→ model output attention đến vulnerability chi tiết hơn so với prompt
+chung chung.
+
+---
+
+## 3. Sampling parameters — cách model "chọn" token
+
+Model output là **phân phối xác suất**. Sampling parameter quyết định
+cách chọn token tiếp theo.
+
+### 3.1. Temperature
+
+Scale độ "sharp" của phân phối xác suất.
+
+- **T = 0** → luôn chọn token xác suất cao nhất → deterministic,
+  repetitive.
+- **T = 0.3** → focused, ít variance.
+- **T = 0.7** (default thường) → cân bằng.
+- **T = 1.0** → nhiều random, sáng tạo.
+- **T > 1.5** → chaotic, dễ nonsense.
+
+### 3.2. Top-p (nucleus sampling)
+
+Chỉ sample từ tập token có cumulative probability ≤ p.
+
+- **p = 0.1** → focus top 10%, predictable.
+- **p = 0.9** (default) → bao gồm phần lớn khả năng.
+- **p = 1.0** → mọi token đều có thể.
+
+### 3.3. Top-k
+
+Chỉ sample từ k token xác suất cao nhất.
+
+- **k = 1** → greedy (tương đương T=0).
+- **k = 40** → moderate diversity.
+- **k = ∞** → không giới hạn.
+
+### 3.4. Chọn combo nào cho task nào
+
+| Task                       | T         | Top-p | Note                         |
+| -------------------------- | --------- | ----- | ---------------------------- |
+| Code refactor, translation | 0         | 1     | Reproducible, ít hallucinate |
+| Bug fix, debugging         | 0 - 0.2   | 0.9   | Cần chính xác                |
+| Code review                | 0.2 - 0.4 | 0.9   | Cân bằng                     |
+| Brainstorm, naming         | 0.7 - 1.0 | 0.95  | Variety                      |
+| Creative writing           | 0.9 - 1.2 | 0.95  | Diverse output               |
+| JSON / structured output   | 0         | 1     | Deterministic                |
+
+**Cursor / Claude.ai / ChatGPT** mặc định T ≈ 0.7. Trong API call, bạn
+set được. Cursor cho chỉnh qua advanced settings.
+
+### 3.5. Deterministic hay không?
+
+- **T = 0 + top-p = 1** → gần như deterministic. Nhưng vẫn có variation
+  nhỏ do floating point + batching trên GPU.
+- Muốn **absolute** reproducible → thêm `seed` parameter (OpenAI
+  support).
+
+Cho test suite / reproducible result: luôn `T=0` + seed cố định.
+
+---
+
+## 4. Stopping criteria — khi nào model dừng
+
+Model không tự biết "đủ rồi, dừng". Nó dừng khi:
+
+### 4.1. End-of-sequence token (EOS)
+
+Token đặc biệt trong vocabulary (`<|endoftext|>` cho GPT). Model học từ
+training khi nào nên output EOS.
+
+### 4.2. Max tokens (hard cap)
+
+Parameter API. Ví dụ `max_tokens=1000` → model dừng sau 1000 token
+dù chưa hết.
+
+**Bẫy phổ biến**: set max_tokens quá thấp → response bị cắt ngang.
+
+### 4.3. Stop sequences (custom)
+
+Chỉ định chuỗi làm trigger dừng:
+
+```python
+client.chat.completions.create(
+    model="gpt-4o",
+    messages=[...],
+    stop=["\n\n", "---", "###"]
+)
+```
+
+Dùng khi muốn model dừng trước 1 section cố định. Ví dụ:
+
+```text
+System: "Trả lời, kết thúc bằng ---END---"
+Stop: ["---END---"]
+```
+
+### 4.4. Programmatic stop (streaming)
+
+Khi streaming, client có thể **stop giữa chừng**:
+
+```text
+Model đang gen: "Để giải quyết vấn đề, bạn có thể dùng axios..."
+User nhấn stop → request aborted → không tốn tiếp output tokens.
+```
+
+Cursor dùng pattern này khi bạn thấy AI đi sai hướng → stop ngay → save
+cost.
+
+---
+
+## 5. Personalization qua System Prompt
+
+System prompt là công cụ mạnh nhất để "chỉnh" personality / behavior
+của model. 3 tầng:
+
+### 5.1. Global — đổi mọi chat
+
+ChatGPT "Custom Instructions", Claude "Projects", Cursor rule always-on.
+
+```text
+You are helping a senior frontend engineer working with TypeScript,
+Astro, and Tailwind CSS.
+
+- Default to TypeScript strict mode
+- Prefer composition over inheritance
+- Use path alias ~/ (not ../..)
+- Suggest existing patterns from codebase before adding dependencies
+- When explaining, be concise. Use Vietnamese for prose, English for
+  technical terms.
+```
+
+### 5.2. Project — đổi theo repo
+
+Cursor `.cursor/rules/*.mdc`, Claude Projects, ChatGPT GPTs:
+
+```text
+Stack for this repo: Astro 5, TypeScript strict, Tailwind v4
+Tokens: --color-bg, --color-fg, --color-accent
+Content: MDX với schema Zod @content.config.ts
+Deploy: Cloudflare Pages
+```
+
+### 5.3. Task — đổi per chat
+
+Inline ở user message đầu tiên:
+
+```text
+For this conversation only: switch to pair-programming mode.
+Explain reasoning step-by-step before code.
+After each code block, wait for my feedback before next step.
+```
+
+Hiểu và dùng đúng 3 tầng → agent đúng ý 90% lần đầu, không phải correct
+10 lần.
+
+---
+
+## 6. Multi-turn conversation — nghệ thuật duy trì context
+
+### 6.1. Context accumulate theo lượt
+
+Mỗi lượt chat, toàn bộ history (system + mọi user + assistant trước)
+được gửi lại. Nghĩa là:
+
+- Conversation 20 lượt = prompt input 20 lượt size.
+- Cost tăng **tuyến tính** theo độ dài.
+
+### 6.2. Khi nào nên start new chat
+
+- Chủ đề thay đổi rõ rệt.
+- Đã có quyết định xong, bắt đầu task mới.
+- Context dính rác từ attempt thất bại.
+- Đã đạt ~50% context window.
+
+### 6.3. Pattern handoff giữa chat
+
+Kết thúc chat cũ:
+
+```text
+"Tổng kết conversation này thành 1 artifact:
+- Quyết định đã chốt
+- Code đã implement
+- Open question còn lại
+
+Format: markdown, tôi sẽ paste vào chat mới."
+```
+
+Paste summary vào chat mới → context gọn, không mang rác.
+
+### 6.4. Anti-pattern: conversation zombie
+
+Chat 3 ngày trước, đã cố fix bug qua 30 lượt, không ra. Đừng tiếp tục —
+zombie context sẽ dắt mũi session mới vào cùng dead-end.
+
+**Fix**: start new chat, paste problem statement clean, để AI approach
+fresh.
+
+---
+
+## 7. Prompt templates tái dùng
+
+### Template: Plan before code
+
+```text
+Task: <mô tả>
+Code context: <file list>
+
+Trước khi code, plan:
+1. Understanding: bạn hiểu task thế nào
+2. Files: create / edit / read-only
+3. 2-3 approach options + pros/cons
+4. Risk + open questions
+
+KHÔNG code. Hỏi tôi nếu có gì chưa rõ.
+```
+
+### Template: Explain-then-ask
+
+```text
+Đoạn code sau:
+[paste]
+
+1. Giải thích từng bước nó làm gì (giả sử tôi là junior dev)
+2. Indentify 3 câu hỏi tôi nên hỏi về nó (performance, correctness,
+   maintainability)
+3. Gợi ý 1 cải tiến có impact nhất
+
+KHÔNG refactor tự động.
+```
+
+### Template: Structured review
+
+```text
+Review @<file> theo 3 lớp:
+
+**Correctness:**
+- Logic đúng spec?
+- Edge cases: null, empty, boundary
+- Error handling
+
+**Quality:**
+- Security risk
+- Performance concern
+- Maintainability
+
+**Fit:**
+- Match convention @<reference file>?
+- Abstraction level phù hợp?
+
+Report issue theo priority. KHÔNG tự fix.
+```
+
+### Template: Comparison decision
+
+```text
+Tôi cần chọn giữa <option A> và <option B> cho <context>.
+
+Analyze:
+1. So sánh cụ thể 5 dimension: A, B, C, D, E
+2. Trade-off chính
+3. Gợi ý lựa chọn với lý do
+4. Case nào option khác lại tốt hơn
+
+Format: markdown table + 1 đoạn kết luận.
+```
+
+### Template: Learn a concept
+
+```text
+Giải thích concept X cho tôi (background: <kinh nghiệm của bạn>).
+
+1. Analogy đời thường
+2. Definition kỹ thuật (chính xác)
+3. 1 ví dụ minimal code
+4. 2 common pitfall khi dùng
+5. Reference để đọc sâu thêm
+
+Length: ~400 chữ. Tiếng Việt + technical English terms.
+```
+
+Lưu vào Cursor Skills, snippet manager, hoặc `~/.cursor/prompts/`. Tái
+dùng sau không phải tự gõ lại mỗi lần.
+
+---
+
+## 8. Anti-patterns phổ biến
+
+### ❌ 8.1. "Please" / "thank you" verbose
+
+Model không được reward thêm khi bạn lịch sự. "Please" đầu prompt = đốt
+3-5 token thừa × mỗi request × số dev × số năm = số lớn. Nếu xài API
+trả tiền.
+
+Với subscription thì không quan trọng. Nhưng build habit concise vẫn tốt.
+
+### ❌ 8.2. Hỏi mơ hồ rồi correct nhiều lần
+
+```text
+❌
+Turn 1: "Viết API route"
+Turn 2: "Không, dùng Hono chứ không Express"
+Turn 3: "Path alias là ~/, không @/"
+Turn 4: "Validator dùng Zod"
+→ 4 round trip, 4x cost
+```
+
+```text
+✅ 1 prompt đầy đủ:
+"Viết API route POST /users với:
+- Framework: Hono
+- Validator: Zod
+- Path alias: ~/
+- Return 201 + user object, 400 nếu email duplicate"
+→ 1 round trip, output đúng lần đầu
+```
+
+### ❌ 8.3. Nhét cả codebase
+
+```text
+❌ "@src/" để hỏi 1 chi tiết nhỏ
+   → 100K+ token attach, đốt tiền, model "lost in middle"
+
+✅ Attach đúng 2-3 file liên quan
+```
+
+### ❌ 8.4. Không define success
+
+```text
+❌ "Improve this code"
+✅ "Improve for readability. Metric: comment ratio ≥ 10%, max function
+    length 20 lines, consistent naming."
+```
+
+### ❌ 8.5. Ignore format output
+
+Model output markdown mà bạn cần JSON → copy sang, parse, fix. Waste.
+
+Define format trong prompt ngay từ đầu: `"Output: JSON with schema {...}"`.
+
+---
+
+## 9. Debugging prompt không hiệu quả
+
+Output không như ý? Kiểm tra theo thứ tự:
+
+1. **Model có đủ info không?** → thiếu context thêm file/docs.
+2. **Constraint có rõ không?** → liệt kê rõ "không được làm X".
+3. **Format output có define không?** → template cụ thể.
+4. **Temperature phù hợp?** → code task T quá cao gây random.
+5. **Role prompt có match không?** → "security engineer" cho security
+   task, "senior engineer" cho code review.
+6. **Context có quá dài?** → chia nhỏ, start new chat.
+
+Nếu đã check 6 điểm trên mà vẫn fail → có thể task vượt khả năng
+model hiện tại. Thử model khác (Claude vs GPT vs Gemini — mỗi model có
+strength khác), hoặc thử thinking model.
+
+---
+
+## 10. Tổng kết
+
+Prompt engineering không phải magic. Nó là **kỹ năng communication
+với máy** — giống communication với người, nhưng người đó đọc rất
+nhanh, quên rất nhanh, và nếu thiếu info sẽ tự bịa.
+
+5 điều quan trọng nhất:
+
+1. **Specific > vague**. Define rõ input, output format, constraint.
+2. **Context right-sized**. Đủ để AI làm đúng, không thừa.
+3. **Parameters matter**. T=0 cho code, T=0.8 cho brainstorm.
+4. **System prompt = bộ khung**. Dùng tốt → agent "hiểu" bạn 10x.
+5. **Template tái dùng** > viết lại prompt mỗi lần.
+
+Bài tiếp theo sẽ đi vào **so sánh các model LLM hiện tại** (Claude,
+GPT, Gemini, Llama) — khi nào nên dùng cái nào cho task nào.
+
+---
+
+### Đọc thêm
+
+- [Tokens & Pricing](/blog/ai-tokens-and-pricing-explained)
+- [AI Hallucination](/blog/ai-hallucination-and-how-to-spot-it)
+- [Cursor Rules](/blog/cursor-rules-guide) — encode system prompt vào
+  project
+- [Working with Coding Agents](/blog/working-with-coding-agents)
+
+### Reference
+
+- OpenAI Prompt Engineering guide (platform.openai.com)
+- Anthropic Prompting docs (docs.anthropic.com)
+- "Prompt Engineering Guide" — [promptingguide.ai](https://promptingguide.ai)

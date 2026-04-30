@@ -38,3 +38,5 @@ coverage/
 
 # Figma ref screenshots (local only)
 .figma-refs/
+
+.cursor/

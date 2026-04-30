@@ -1,0 +1,449 @@
+---
+title: 'Customizing AI Agent — Biến Cursor thành cộng sự biết rõ việc của bạn'
+description: 'Customization stack 5 tầng: Rules, Skills, MCP, Sub-agents, Hooks. Chiến lược progressive customization, khi nào team-share và khi nào giữ personal, và cách maintain để config không biến thành technical debt sau 6 tháng.'
+pubDate: 2026-04-30
+tags: [ai, coding-agent, customization, productivity, workflow]
+draft: false
+---
+
+AI agent out-of-the-box là một **junior dev tài năng nhưng không biết
+team**. Biết JavaScript, biết pattern, nhưng không biết project bạn dùng
+`pnpm` không phải `npm`, không biết convention `kebab-case` của team,
+không biết MCP internal của công ty.
+
+Customization là việc "onboard" agent vào môi trường cụ thể của bạn. Làm
+tốt, agent nói như người trong team. Làm dở, agent vẫn generic và bạn
+correct nó cùng 1 thứ 50 lần/tuần.
+
+Bài này là playbook customize theo 5 tầng, progressive từ nhẹ đến nặng.
+
+---
+
+## 1. Vì sao customize — không phải just-a-preference
+
+Không customize và customize khác nhau **không phải ở chất lượng code**,
+mà ở **số lần bạn phải can thiệp**.
+
+```text
+Không customize:
+  Bạn: "Viết 1 API route"
+  AI:  [output generic, dùng Express syntax]
+  Bạn: "Không, project này dùng Astro API routes"
+  AI:  [fix]
+  Bạn: "Path alias của project là ~/ không phải @/"
+  AI:  [fix]
+  Bạn: "Validator dùng Zod chứ không phải Joi"
+  AI:  [fix]
+  — 15 phút mới xong 1 file.
+
+Có customize:
+  Bạn: "Viết 1 API route cho endpoint /posts"
+  AI:  [output đúng stack, đúng style, đúng validator ngay lần đầu]
+  — 2 phút xong.
+```
+
+Thời gian tiết kiệm x số task/ngày x 300 ngày làm việc = ROI không cần
+bàn.
+
+Nhưng customization có **cost**: time setup, time maintain, risk over-
+engineer. Khi nào stop? Đó là câu hỏi chính của bài.
+
+---
+
+## 2. Customization stack — 5 tầng
+
+```text
+┌───────────────────────────────────────────────────────┐
+│ Tầng 5: Hooks / Snippets        (event-driven)        │
+│         Trigger tự động ở file save, commit, open     │
+├───────────────────────────────────────────────────────┤
+│ Tầng 4: Sub-agents              (task-specific)       │
+│         Chia nhỏ task nặng, bảo vệ context            │
+├───────────────────────────────────────────────────────┤
+│ Tầng 3: MCP                     (external capability) │
+│         Kết nối AI với data/tool ngoài                 │
+├───────────────────────────────────────────────────────┤
+│ Tầng 2: Skills                  (workflow-based)      │
+│         Đóng gói workflow phức tạp                    │
+├───────────────────────────────────────────────────────┤
+│ Tầng 1: Rules                   (always-on / glob)    │
+│         Coding standard, convention                    │
+└───────────────────────────────────────────────────────┘
+```
+
+Đi từ dưới lên: mỗi tầng ít người setup hơn, nhưng lợi nhiều hơn cho
+team scale.
+
+### Tầng 1: Rules — bắt đầu từ đây
+
+Đã có [bài riêng về Rules](/blog/cursor-rules-guide), tóm lược:
+
+- File `.mdc` trong `.cursor/rules/`
+- Apply theo `alwaysApply: true` hoặc glob pattern
+- Chứa coding standard, naming, convention
+
+**Start here**. Cost thấp, benefit cao. Project mới nên có **5-8 rule**
+trong ngày đầu:
+
+- `coding-standards.mdc` (always)
+- Rule theo ngôn ngữ (`typescript.mdc`, `python.mdc`)
+- Rule theo framework (`react.mdc`, `astro.mdc`)
+- Rule styling (`tailwind.mdc`, `css.mdc`)
+- Rule test (`testing.mdc`)
+- Rule commit (`git-commits.mdc`, manual trigger)
+
+### Tầng 2: Skills — khi có workflow lặp lại
+
+Đã có [bài riêng](/blog/cursor-skills-beginner-guide). Khi nào viết Skill:
+
+- Bạn làm cùng 1 workflow ≥ 3 lần.
+- Workflow > 3 bước.
+- Output có format cố định.
+
+Ví dụ Skill phù hợp cho dev frontend:
+
+- `review-pr` — review theo checklist của team
+- `write-adr` — viết Architecture Decision Record theo template
+- `debug-production` — playbook khi có incident prod
+- `migrate-component` — migrate component class → function
+- `publish-blog-post` — SEO check + OG image + changelog
+
+Lưu ở `.cursor/skills/<name>/SKILL.md` (project) hoặc
+`~/.cursor/skills/<name>/SKILL.md` (personal, xài cho mọi project).
+
+### Tầng 3: MCP — mở rộng khả năng
+
+MCP (Model Context Protocol) là "cổng cắm" cho AI giao tiếp với hệ
+thống ngoài. Xem [bài MCP architecture](/blog/mcp-model-context-protocol-architecture)
+đã có trên blog.
+
+**Khi nào cần MCP:**
+
+- AI phải truy cập data ngoài repo: Jira, Notion, database, API nội bộ.
+- AI cần tool chuyên biệt: design (Figma), monitoring (Datadog),
+  documentation (Context7).
+- Bạn muốn AI tự update trạng thái ticket, comment PR, deploy.
+
+**MCP phổ biến dev frontend nên biết:**
+
+| MCP        | Dùng để                                               |
+| ---------- | ----------------------------------------------------- |
+| Context7   | AI đọc docs library real-time (chống hallucinate API) |
+| GitHub     | Query PR, commit, issue                               |
+| Figma      | Đọc design, extract token, check frame                |
+| Atlassian  | Jira ticket, Confluence doc                           |
+| Database   | Query schema, sample data                             |
+| Playwright | Browser automation, screenshot để verify UI           |
+
+**Cost**: setup trung bình (config JSON + auth). Maintenance cao hơn
+Rule/Skill vì MCP server có thể thay đổi version.
+
+### Tầng 4: Sub-agents
+
+Xem [bài Sub-agents](/blog/cursor-sub-agents-guide). Customize mức này
+nghĩa là:
+
+- Define prompt template cho các sub-agent thường dùng (scout
+  codebase, gather spec từ Jira, analyze wireframe).
+- Setup pattern "gatherer → analyzer → synthesizer" cho các task nặng.
+
+Cost cao nhất trong 5 tầng, nhưng khi làm đúng → task 1h rút xuống 15
+phút.
+
+### Tầng 5: Hooks / Snippets — automation event-driven
+
+Tầng ít người biết nhất. Cursor (và các IDE AI khác) cho phép bind
+action AI vào event:
+
+- **File save**: auto-format, auto-add missing import, auto-generate
+  JSDoc cho function mới.
+- **Git commit**: auto-suggest commit message từ diff.
+- **File open**: auto-load relevant context.
+- **PR create**: auto-generate PR description từ commit history.
+
+Setup thường qua file `hooks.json` hoặc tương đương. Cost cao, nhưng
+loại automation này **không thể thay thế** một khi đã quen.
+
+---
+
+## 3. Progressive customization — chiến lược step-by-step
+
+Đừng setup cả 5 tầng ngày đầu. Scale theo pain point.
+
+### Week 1: Baseline
+
+- 3-5 Rules cơ bản (coding-standards, ngôn ngữ chính, framework chính).
+- KHÔNG Skill, KHÔNG MCP.
+- Dùng AI như bình thường, ghi chép **lần nào bạn phải correct AI**.
+
+### Week 2-3: Identify pain
+
+Sau 2 tuần, review notes:
+
+- Correction nào lặp ≥ 5 lần → nâng lên Rule.
+- Workflow nào làm ≥ 3 lần → nâng lên Skill.
+- Nhu cầu nào không có tool đáp ứng → cân nhắc MCP.
+
+### Month 2: Add MCP
+
+Cắm MCP theo ưu tiên:
+
+1. Docs library (Context7) — ngăn hallucinate.
+2. Ticket system (Jira/Linear) — nếu team dùng.
+3. Design (Figma) — nếu là dev front.
+
+### Month 3+: Sub-agents + Hooks
+
+Chỉ khi đã có workflow ổn định. Customize tầng 4-5 **khi bạn đã biết
+chắc pattern nào đáng automate**.
+
+Đừng đi từ tầng 5 xuống — đó là over-engineering.
+
+---
+
+## 4. Personal vs Team — ranh giới
+
+Customization có 2 scope:
+
+- **Personal**: `~/.cursor/` — chỉ máy bạn, mọi project.
+- **Team/Project**: `<repo>/.cursor/` — commit vào repo, mọi người
+  chung.
+
+Phân chia sao cho đúng:
+
+| Type                                              | Personal | Team |
+| ------------------------------------------------- | -------- | ---- |
+| Rule coding-style cá nhân (tab vs space taste)    | ✅       | ❌   |
+| Rule coding convention chung project              | ❌       | ✅   |
+| Skill workflow cá nhân (viết blog, quản lý note)  | ✅       | ❌   |
+| Skill workflow chung (review PR, release process) | ❌       | ✅   |
+| MCP auth cá nhân (GitHub token của bạn)           | ✅       | ❌   |
+| MCP config chung (server URL, schema)             | ❌       | ✅   |
+
+**Lỗi phổ biến**: commit MCP config có secret vào repo → leak token.
+Luôn tách `mcp.json` config vào `.gitignore` nếu chứa auth, dùng
+`.env.example` để chỉ đường.
+
+---
+
+## 5. Chia sẻ customization cho team
+
+Khi customization thành tài sản team, phải quản lý như code:
+
+### 5.1. Documentation
+
+Mỗi Rule / Skill team-shared cần:
+
+- Lý do tồn tại (why).
+- Ví dụ trước/sau khi apply.
+- Khi nào update.
+- Maintainer.
+
+Không có docs → sau 6 tháng không ai nhớ vì sao có file đó, xóa bỏ
+luôn.
+
+### 5.2. Review khi thay đổi
+
+Customization = code. Thay đổi phải qua PR review, không push thẳng.
+
+```text
+.cursor/rules/
+└── typescript.mdc   ← review như review util function
+```
+
+### 5.3. Versioning
+
+Project có release v1.x dùng rule set A. v2.x dùng rule set B. Rule đổi
+thì tag version hoặc note trong changelog.
+
+### 5.4. Onboarding doc
+
+README của project nên có section:
+
+```markdown
+## AI Customization
+
+Repo có Cursor rules + skills cho team. Sau khi clone:
+
+1. Install Cursor v0.45+
+2. Open repo → rules auto-load
+3. Skills trong .cursor/skills/ load on-demand
+4. Personal MCP token: copy .env.example → .env, fill in
+```
+
+---
+
+## 6. Maintenance — khi customization biến thành nợ
+
+Customization không phải "setup once forget forever". Code base thay
+đổi → rules cũ lệch → agent follow rule sai → tạo bug.
+
+### Dấu hiệu customization đã stale
+
+- Rule nói "dùng `useMemo`" nhưng codebase đã chuyển sang React 19
+  compiler tự memoize.
+- Skill nói "deploy qua Vercel" nhưng project đã chuyển Cloudflare.
+- MCP trỏ server internal đã sunset.
+- Sub-agent prompt reference file đã bị xóa.
+
+### Quy trình audit định kỳ
+
+**Mỗi quý** (3 tháng), dành 1 buổi:
+
+1. Open từng file trong `.cursor/`.
+2. Tự hỏi: "Rule/Skill này còn match codebase hiện tại không?"
+3. 3 action có thể: keep, update, delete.
+4. Ưu tiên **delete** — ít customization chất lượng > nhiều customization
+   stale.
+
+### Kill switch
+
+Customization bắt đầu gây harm hơn là help → **xóa ngay**, không cố sửa.
+File `.cursor/rules/` trong Git, muốn khôi phục được. Đừng giữ rule sai
+chỉ vì "đã tốn công viết".
+
+---
+
+## 7. Anti-patterns — khi customize phản tác dụng
+
+### ❌ 7.1. Rule dài lê thê
+
+100 dòng rule → agent đọc lướt → miss nội dung quan trọng.
+
+Rule > 50 dòng = smell. Chia nhỏ hoặc đổi sang Skill.
+
+### ❌ 7.2. `alwaysApply: true` cho mọi Rule
+
+Tất cả Rule alwaysApply → context đầy 30% mỗi chat → mọi response ngắn
+hơn, agent quên task gốc nhanh.
+
+Giới hạn: ≤ 2 rule alwaysApply. Còn lại dùng glob.
+
+### ❌ 7.3. Skill làm mọi thứ
+
+"Super-skill" 500 dòng cover 10 task khác nhau. Agent load vào → tốn
+token, khó trigger đúng.
+
+1 Skill = 1 task. Chia nhỏ.
+
+### ❌ 7.4. MCP quá nhiều
+
+Cắm 15 MCP "phòng khi cần". Mỗi chat agent check schema của 15 tool →
+chậm, lẫn lộn, đôi khi trigger tool sai.
+
+Chỉ cắm MCP bạn **thực sự dùng hàng tuần**. Còn lại tắt.
+
+### ❌ 7.5. Customization mâu thuẫn
+
+Rule A nói "dùng tabs". Rule B nói "dùng 2 spaces". Agent confuse →
+output random.
+
+Audit định kỳ để spot mâu thuẫn. Tool nào 2 rule "không nhất quán"
+(Cursor settings show warning) thì fix.
+
+### ❌ 7.6. Secret trong config
+
+MCP config chứa API token commit vào repo public → leak. Tìm thấy qua
+GitHub search `token=` hoặc qua credential scanner.
+
+**Rule cứng**: secret luôn ở env var hoặc `.gitignore`'d file.
+
+---
+
+## 8. Setup đề xuất cho dev frontend solo
+
+Blog cá nhân / project solo, đơn giản hóa:
+
+```text
+.cursor/
+├── rules/
+│   ├── coding-standards.mdc    # always apply
+│   ├── typescript.mdc          # glob **/*.ts
+│   ├── astro-components.mdc    # glob **/*.astro
+│   ├── tailwind.mdc            # glob **/*.{tsx,astro}
+│   └── git-commits.mdc         # manual
+├── skills/
+│   └── publish-blog-post/      # personal workflow
+│       └── SKILL.md
+└── mcp.json                    # optional
+    └── { "context7": {...} }
+```
+
+Không có MCP phức tạp, không sub-agent custom, không hooks. Tầng 1+2 là
+đủ 95% use case solo.
+
+## Setup đề xuất cho dev trong team 5-10 người
+
+```text
+<repo>/.cursor/
+├── rules/            # team-shared, 6-10 file
+├── skills/
+│   ├── review-pr/
+│   ├── write-adr/
+│   └── release-process/
+└── mcp.json          # shared config (no secret)
+```
+
+Cộng thêm personal `~/.cursor/`:
+
+```text
+~/.cursor/
+├── rules/            # personal style
+├── skills/           # personal workflow
+└── mcp.json          # personal auth (git tokens...)
+```
+
+---
+
+## 9. Đo hiệu quả customization
+
+Khó đo chính xác, nhưng có proxy metrics:
+
+- **Số lần "correct AI"** trong ngày: giảm theo thời gian?
+- **Time-to-first-accept** của AI suggestion: giảm?
+- **Onboarding time** cho dev mới: rút xuống bao nhiêu?
+- **Consistency** của PR: diff style lẫn nhau ít dần?
+
+Không track chặt chẽ được, nhưng mỗi sprint retrospective có thể hỏi
+định tính: "AI hiện tại có giúp anh em làm nhanh hơn sprint trước
+không?"
+
+---
+
+## 10. Tổng kết
+
+Customization AI agent = **đầu tư R&D của dev cá nhân / team**. ROI cao
+nếu làm đúng, đốt thời gian nếu over-engineer.
+
+Nguyên tắc:
+
+1. **Start với Rules**. Nhẹ, cost thấp, benefit cao.
+2. **Scale theo pain**. Correction lặp lại → Rule mới. Workflow lặp
+   → Skill.
+3. **MCP khi thực sự cần tool/data ngoài**. Không cắm phòng khi.
+4. **Tách personal vs team rõ ràng**. Secret không bao giờ commit.
+5. **Audit mỗi quý**. Customization stale > no customization.
+6. **Delete nhanh** khi không còn phù hợp.
+
+AI agent là platform. Bạn càng invest vào "programming" nó, nó càng hợp
+với context bạn. Nhưng đừng quên đây vẫn là **tool**, không phải
+religion — tool nên phục vụ bạn, không ngược lại.
+
+Bài cuối của series sẽ là case study: 1 feature thật từ ticket đến deploy,
+dùng toàn bộ customization + workflow đã đề cập trong 7 bài.
+
+---
+
+### Đọc thêm trong series
+
+- [Working with Coding Agents](/blog/working-with-coding-agents)
+- [Understanding Codebase with AI](/blog/understanding-codebase-with-ai)
+- [Developing Features with AI](/blog/developing-features-with-ai)
+- [Finding and Fixing Bugs with AI](/blog/finding-and-fixing-bugs-with-ai)
+- [Reviewing and Testing Code with AI](/blog/reviewing-and-testing-code-with-ai)
+- [Cursor Rules](/blog/cursor-rules-guide)
+- [Cursor Skills](/blog/cursor-skills-beginner-guide)
+- [Cursor Sub-agents](/blog/cursor-sub-agents-guide)
+- [MCP Architecture](/blog/mcp-model-context-protocol-architecture)
+- Cursor Learn course ([cursor.com/learn](https://cursor.com/learn)) —
+  reference bổ sung tiếng Anh

@@ -1,0 +1,522 @@
+---
+title: 'Finding and Fixing Bugs với AI — Debug workflow không bị dắt mũi'
+description: 'Cấu trúc debug với AI: reproduce trước, hypothesis sau, fix cuối. Kỹ thuật minimal repro, git bisect với AI, stacktrace decoding, heisenbug hunting, và lý do vì sao AI thường fix sai khi bạn chưa verify cause.'
+pubDate: 2026-04-30
+tags: [ai, coding-agent, debugging, workflow, productivity]
+draft: false
+---
+
+Debug là lĩnh vực AI đặc biệt hữu ích — và đặc biệt nguy hiểm. Hữu ích
+vì AI đọc stacktrace / log 1000 dòng trong 5s. Nguy hiểm vì AI rất giỏi
+**fix nhầm** — trả về code trông có vẻ đúng, chạy có vẻ được, nhưng thực
+ra chỉ mask triệu chứng, cause vẫn còn.
+
+Bài này là workflow 5 bước để debug có kỷ luật với AI, không bị trả giá
+bằng production incident 2 tuần sau.
+
+---
+
+## 1. Vì sao AI fix sai dễ hơn fix đúng
+
+Scenario quen thuộc: bug report "button không click được". Bạn paste
+vào Cursor:
+
+```text
+"Button submit không click được. Fix giúp."
+```
+
+AI thấy event handler, thấy `disabled` logic, thấy form validation.
+Không biết bug thật ở đâu → AI fix "có vẻ liên quan":
+
+```tsx
+// AI gợi ý:
+<button
+  onClick={handleSubmit}
+  disabled={false}   // ← force enable cho chắc
+  type="button"
+>
+```
+
+Bug biến mất (cho đến khi bạn click nhanh 2 lần → submit 2 request).
+Cause thật là race condition giữa validation async và enable state. AI
+không biết → fix cosmetic.
+
+Vấn đề cốt lõi: **AI fix dựa trên pattern, không dựa trên understanding
+của cause**. Nếu bạn chưa biết cause, AI cũng không biết. Nó chỉ đoán.
+
+Workflow đúng: **xác định cause trước**, fix sau. AI giúp cả 2 bước,
+nhưng bạn phải gate đúng thứ tự.
+
+---
+
+## 2. Bug loop — 4 nhịp kinh điển
+
+Mọi bug được giải quyết qua 4 bước, bất kể có AI hay không:
+
+```text
+┌─────────────────────────────────────────────────┐
+│                                                 │
+│  1. REPRODUCE      "Bug xảy ra khi nào?"        │
+│         ↓                                       │
+│  2. ISOLATE        "Đoạn code nào gây ra?"      │
+│         ↓                                       │
+│  3. UNDERSTAND     "Tại sao nó sai?"            │
+│         ↓                                       │
+│  4. FIX + VERIFY   "Sửa đúng cause, kiểm tra"   │
+│                                                 │
+└─────────────────────────────────────────────────┘
+```
+
+AI accelerate cả 4 bước — nhưng bạn **không được skip** bước nào. Nhất
+là bước 3. Fix mà không understand = fix gambling.
+
+---
+
+## 3. Bước 1: REPRODUCE — nền tảng của mọi debug session
+
+### "Works on my machine" không phải bug report
+
+Trước khi code 1 dòng nào:
+
+- **Steps chính xác** để trigger bug (nhịp tay, thứ tự click, data input).
+- **Environment**: browser, OS, version app.
+- **Expected vs Actual**.
+
+Thiếu 1 trong 3 → chưa đủ thông tin để debug.
+
+### Minimal repro — lõi của debug
+
+Từ bug 500-line trong production, rút gọn thành **1 test case < 20 dòng**
+trigger đúng bug. Nghe đơn giản, là kỹ năng khó nhất của debug.
+
+AI giúp tốt:
+
+```text
+"Đây là code nơi bug xảy ra: @src/pages/checkout.tsx
+
+Bug: khi user click Submit và Cancel trong 100ms, cart bị duplicate.
+
+Giúp tôi rút gọn về minimal reproduction:
+- Tạo file test riêng
+- Chỉ code liên quan trigger bug
+- Mock phần không liên quan
+- Output: test case chạy được, fail với lỗi giống production"
+```
+
+Có minimal repro = **50% battle won**. Nó biến bug "lúc có lúc không"
+thành test case objective.
+
+### Bug không repro được?
+
+Gọi là **heisenbug**. Thường do:
+
+- **Race condition**: timing khác giữa máy dev và prod.
+- **State bẩn**: user accumulated state qua nhiều session.
+- **Environment-specific**: browser khác, network chậm, memory thấp.
+
+Với heisenbug, đừng fix ngay. Đầu tư thời gian reproduce **ổn định**
+trước. Các kỹ thuật:
+
+- Chạy test loop 100 lần (bug xuất hiện 1/100? Vẫn OK, giờ có repro rồi).
+- Inject delay để force race condition.
+- Record session với Playwright / Chrome DevTools.
+
+---
+
+## 4. Bước 2: ISOLATE — thu hẹp vùng nghi ngờ
+
+### Binary search với git bisect
+
+Bug xuất hiện từ khi nào? Commit nào gây ra? `git bisect` là công cụ
+huyền thoại cho việc này. AI không thay thế được bisect, nhưng giúp
+setup nhanh:
+
+```text
+"Giúp tôi setup git bisect để tìm commit gây bug.
+- Commit tốt cuối cùng: v2.3.1 tag
+- Commit xấu: HEAD
+- Test command: npm test -- checkout.test.ts
+
+Viết script test wrapper trả exit 0/1 đúng chuẩn bisect."
+```
+
+AI sinh script, bạn chạy `git bisect start; git bisect run ./test.sh`.
+Trong 30 phút biết chính xác commit gây bug — với codebase có 500 commit
+giữa tốt và xấu.
+
+### Stacktrace decoding
+
+Stacktrace dài + framework code lẫn user code:
+
+```text
+"Đây là stacktrace: [paste]
+
+Giúp tôi:
+1. Phân biệt frame user code vs framework internal
+2. Line nào user code đầu tiên bị dính
+3. Call chain logic dẫn đến error đó
+4. Giả thuyết về cause (xếp theo khả năng)"
+```
+
+AI giỏi việc này vì đã đọc nhiều stacktrace pattern. Bạn tiết kiệm 15
+phút scroll log.
+
+### Delta debugging cho input phức tạp
+
+Input 10KB JSON gây bug. Cần rút gọn về 50 bytes giữ nguyên bug:
+
+```text
+"Input này trigger bug: [paste JSON 10KB]
+
+Rút gọn về minimal:
+- Xóa field không liên quan
+- Rút array về 1-2 phần tử
+- Giữ đúng structure gây bug
+
+Nếu không chắc field nào cần thiết, hỏi tôi."
+```
+
+Kết quả: input 50 bytes, vẫn repro bug, dễ reasoning hơn nhiều.
+
+### Không có stacktrace? Dùng log thông minh
+
+Thay vì `console.log` rải rác, dùng **structured logging**:
+
+```ts
+logger.debug('checkout.submit', {
+  userId,
+  cartId,
+  itemCount: items.length,
+  validationPassed,
+  submitInProgress,
+});
+```
+
+Sau đó hỏi AI:
+
+```text
+"Đây là 200 dòng log: [paste]
+
+Filter ra sequence dẫn đến bug. Highlight sự kiện bất thường."
+```
+
+AI biết đọc log format có cấu trúc, spot được abnormality nhanh hơn
+mắt thường.
+
+---
+
+## 5. Bước 3: UNDERSTAND — bước quan trọng nhất
+
+### Đừng hỏi "fix thế nào", hỏi "tại sao sai"
+
+```text
+❌ "Fix bug cart duplicate"
+✅ "Giải thích vì sao cart bị duplicate khi user click Submit + Cancel
+    nhanh. Trace từ state management đến network request."
+```
+
+Câu hỏi "vì sao" ép AI reasoning, không chỉ pattern match. Output đầu
+thường sai, bạn challenge:
+
+```text
+You: "AI gợi ý cause là race condition, nhưng code có lock ở dòng 45.
+      Sao nó vẫn race?"
+
+AI: [nghĩ lại, phát hiện lock release quá sớm]
+```
+
+Dialog này là **real debugging**. AI giỏi tool, bạn giỏi critical
+thinking.
+
+### Hypothesis → Test → Learn
+
+Debug là khoa học thực nghiệm:
+
+```text
+Hypothesis: "Bug do setState batching bị skip trong event async"
+
+Test: Viết test case isolated chỉ với setState async
+      → Expect: bug xuất hiện
+      → Actual: bug xuất hiện
+      → Hypothesis confirmed
+
+Hoặc:
+      → Actual: không xuất hiện
+      → Hypothesis sai, thử giả thuyết khác
+```
+
+Ghi lại mỗi hypothesis đã test (dù pass hay fail). Sau 3-4 test bạn có
+bức tranh rõ của code flow quanh bug.
+
+### Check assumption
+
+Bug đến từ assumption sai. Hỏi AI:
+
+```text
+"List 5 assumption mà code ở @checkout.tsx đang dựa vào để hoạt động
+đúng. Ví dụ: 'giả định cart không bao giờ null'."
+```
+
+Đi qua từng assumption, check xem nó còn đúng không. Thường 1 trong số
+đó đã bị break bởi thay đổi gần đây.
+
+---
+
+## 6. Bước 4: FIX + VERIFY
+
+### Viết test **trước** khi fix
+
+TDD debug style:
+
+1. Có minimal repro → biến thành test case (Bước 1 đã làm).
+2. Test đang **fail** = expected state.
+3. Implement fix.
+4. Test **pass** = bug gone.
+5. **Chạy toàn bộ test suite** = không break gì khác.
+
+Step 5 bắt buộc. AI rất hay "fix bug A, break test B" mà không biết.
+
+### AI-assisted fix
+
+Đã understand cause → fix rõ ràng. Prompt AI:
+
+```text
+"Cause đã xác định: <cause>.
+Fix theo hướng: <approach>.
+Implement trong @<file>.
+Đừng đổi API public.
+Sau khi fix, chạy test cases X, Y, Z và report."
+```
+
+AI sinh code, bạn review diff, test verify.
+
+### Don't fix symptom
+
+```text
+❌ FIX SYMPTOM
+Bug: cart double → add "if (submitting) return"
+→ Race vẫn còn, chỉ ẩn ở 1 path
+
+✅ FIX CAUSE
+Bug: cart double vì optimistic update không atomic
+→ Dùng proper lock / server-side idempotency key
+```
+
+Dấu hiệu fix symptom:
+
+- Bug "biến mất" mà bạn không giải thích được vì sao code mới đúng.
+- Cần `setTimeout` / `debounce` để workaround.
+- Thêm check "defensive" nhưng không biết check gì.
+
+Thấy 1 trong 3 → **quay lại Bước 3**, chưa understand đủ.
+
+### Regression test
+
+Sau khi fix, commit test case MINIMAL REPRO từ Bước 1 vào suite. Đây là
+**regression test** — đảm bảo bug này không tái xuất.
+
+```bash
+git commit -m "fix(cart): prevent double submit on rapid clicks
+
+Root cause: submit state was not atomic with network request,
+allowing concurrent submissions to pass the 'in-progress' check.
+
+Fix: use ref-based lock + idempotency key header.
+
+Test: regression test added for 100ms double-click scenario."
+```
+
+Commit message phản ánh cả 4 bước — cause, fix, test. Người sau maintain
+sẽ cảm ơn bạn.
+
+---
+
+## 7. Production bug — playbook khẩn
+
+Bug prod khác dev ở điểm: **đồng hồ đang chạy**. Tiền đang mất, user
+đang bỏ đi.
+
+### Priority 1: Containment (< 10 phút)
+
+**Đừng fix ngay. Chặn lan rộng trước.**
+
+- Feature flag off.
+- Rollback deployment.
+- Rate limit endpoint.
+- Put up maintenance banner.
+
+Containment thành công → bạn có đủ thời gian debug tử tế. Không containment
+→ bạn code vội vã dưới áp lực → fix sai → incident kéo dài.
+
+### Priority 2: Forensics
+
+- Lấy log gần lúc incident, sao lưu.
+- Screenshot monitoring dashboard.
+- Identify blast radius: bao nhiêu user, bao nhiêu tiền.
+
+AI giúp nhanh phần này:
+
+```text
+"Đây là 500 dòng error log [paste]. Group by:
+- Error type
+- User affected
+- Timestamp distribution
+
+Identify pattern bất thường."
+```
+
+### Priority 3: Root cause
+
+Giống Bước 3 ở trên, nhưng **time-boxed**. Nếu 2 giờ chưa tìm ra cause
+→ escalate, không tự debug thêm.
+
+### Priority 4: Fix + Verify
+
+Fix trong staging. Test thorough. Deploy canary (10% traffic) trước full.
+
+### Sau incident: Postmortem
+
+Document theo format:
+
+- Timeline: khi nào bug ship, khi nào detect, khi nào fix.
+- Root cause: nguyên nhân kỹ thuật + quy trình (tại sao review không
+  catch, test không cover).
+- Action items: fix root cause + fix quy trình.
+
+AI giúp draft postmortem nhưng **người phải kiểm tra mỗi statement**.
+Postmortem sai = lessons sai = incident lặp lại.
+
+---
+
+## 8. Anti-patterns debug với AI
+
+### ❌ 8.1. Paste 500 dòng code + "Fix bug"
+
+Không có stacktrace, không có repro, không có expected behavior. AI
+đoán bừa. Bạn chạy theo.
+
+**Fix**: debug rule #1 — **luôn có repro trước**.
+
+### ❌ 8.2. Accept fix AI ngay khi test pass
+
+Test pass sau fix → chắc gì cause đã đúng? Fix có thể đang mask cause.
+Một bug khác sẽ lộ ra trong tuần.
+
+**Fix**: sau khi fix + test pass, dành 5 phút tự đặt câu hỏi: "Cause
+là gì? Tại sao fix này giải quyết đúng cause?" Không trả lời được →
+chưa understand, re-debug.
+
+### ❌ 8.3. Debug khi đã mệt
+
+Bug khó + não mệt = quyết định kém. AI nịnh bạn theo hướng sai, bạn
+không có năng lượng challenge.
+
+**Fix**: bug sau 6h code không ra → **đi ngủ**. Sáng mai 30 phút là ra.
+
+### ❌ 8.4. Không log đủ
+
+Codebase không có structured logging → mỗi lần debug phải thêm log,
+deploy, đợi repro. Chu kỳ 1h/iteration.
+
+**Fix**: invest vào logging sớm. Log level, structured format, search
+được. Giảm chu kỳ debug từ giờ xuống phút.
+
+### ❌ 8.5. "Ask AI to explain the code" thay vì đọc
+
+Bug trong code bạn viết 3 tháng trước. Bạn lười đọc → hỏi AI giải thích.
+AI summary **approximate** → bạn dựa vào đó debug → sai.
+
+**Fix**: code bạn viết thì bạn đọc. AI giúp scan code **người khác**.
+Code mình → tự chịu trách nhiệm.
+
+---
+
+## 9. Kỹ thuật advanced
+
+### 9.1. Time-travel debugging với Replay
+
+Công cụ như Replay.io ghi lại **mọi state** của app khi bug xảy ra. Bạn
+tua ngược, set breakpoint ở bất kỳ dòng nào. AI tích hợp đọc được trace
+này → chỉ đúng frame gây bug.
+
+### 9.2. Differential testing
+
+Bug chỉ xuất hiện ở 1 môi trường? So sánh config:
+
+```text
+"Đây là 2 config:
+- Dev (work): [paste]
+- Staging (bug): [paste]
+
+Diff và highlight field nào có thể gây khác behavior."
+```
+
+### 9.3. Chaos engineering ngược
+
+Bug nghi do timing? Force worst case:
+
+- Chậm network 2s mọi request.
+- Random kill 10% request.
+- Throttle CPU 4x.
+
+Bug repeat đều đều → đúng là race. Không repeat → cause khác.
+
+### 9.4. Multi-agent debug
+
+Task quá lớn, dùng [sub-agent](/blog/cursor-sub-agents-guide):
+
+```text
+Parent:
+  - Sub-agent A: đọc log, extract pattern
+  - Sub-agent B: đọc code related, list hypothesis
+  - Parent: tổng hợp, chọn hypothesis tốt nhất, test
+```
+
+Parent không phải đọc log raw + code raw → context gọn, reasoning sắc.
+
+---
+
+## 10. Checklist trước khi close bug
+
+- [ ] Repro được ổn định (không flaky)
+- [ ] Minimal repro đã save thành test case
+- [ ] Cause được viết thành 2-3 câu rõ ràng
+- [ ] Fix ≠ symptom mask
+- [ ] Regression test added
+- [ ] Full test suite pass (không chỉ test mới)
+- [ ] Commit message mô tả cause + fix
+- [ ] Nếu production: postmortem + action item
+
+Thiếu 1 gạch = bug **chưa** close. Cứ bỏ vào "open", debug thêm.
+
+---
+
+## 11. Tổng kết
+
+Debug với AI là cân bằng giữa:
+
+- **AI mạnh**: đọc log nhanh, decode stacktrace, gợi ý hypothesis, gen
+  test.
+- **Người mạnh**: hiểu context, challenge assumption, phân biệt cause
+  vs symptom, quyết định scope fix.
+
+Dùng đúng → debug feature hỏng trong 30 phút. Dùng sai → fix nhầm, bug
+quay lại sau 2 tuần với cấp độ nghiêm trọng hơn.
+
+Quy tắc vàng: **Reproduce → Understand → Fix**. Skip Reproduce = gambling.
+Skip Understand = masking. Skip Fix verify = regression.
+
+Bài tiếp theo trong series sẽ đi vào **code review + testing** — hai kỹ
+năng đôi khi bị xem nhẹ nhưng quyết định code nào lên production.
+
+---
+
+### Đọc thêm
+
+- [Working with Coding Agents](/blog/working-with-coding-agents)
+- [Developing Features with AI](/blog/developing-features-with-ai)
+- [Understanding Codebase with AI](/blog/understanding-codebase-with-ai)
+- [Cursor Sub-agents](/blog/cursor-sub-agents-guide)
+- [AI Hallucination](/blog/ai-hallucination-and-how-to-spot-it)
+- Cursor Learn course ([cursor.com/learn](https://cursor.com/learn)) —
+  reference tiếng Anh

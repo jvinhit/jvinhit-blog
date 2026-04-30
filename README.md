@@ -188,10 +188,10 @@ Pages trong repo settings và push là xong.
 Project site của GH Pages serve tại `https://<user>.github.io/<repo>/` nên
 mọi internal link cần prepend `/<repo>`. Ta xử lý tự động qua env var:
 
-| Env var     | Local / CF Pages  | GitHub Pages project      |
-| ----------- | ----------------- | ------------------------- |
+| Env var     | Local / CF Pages     | GitHub Pages project       |
+| ----------- | -------------------- | -------------------------- |
 | `SITE_URL`  | _(unset → SITE.url)_ | `https://<user>.github.io` |
-| `BASE_PATH` | _(unset → `/`)_   | `/<repo>`                 |
+| `BASE_PATH` | _(unset → `/`)_      | `/<repo>`                  |
 
 Workflow đã hard-code giá trị cho repo `jvinhit/jvinhit-blog`. **Nếu rename
 repo hoặc fork sang tên khác, đổi 2 env var trong

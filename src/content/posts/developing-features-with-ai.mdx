@@ -1,0 +1,521 @@
+---
+title: 'Developing Features với AI — Plan, Scaffold, Build, Polish'
+description: 'Workflow 4 pha để ship feature với AI agent: từ ticket mơ hồ đến PR merge. Nguyên tắc decomposition, spec-first, vertical slice, và những prompt template dùng đi dùng lại cho scaffold + review.'
+pubDate: 2026-04-30
+tags: [ai, coding-agent, feature-development, workflow, productivity]
+draft: false
+---
+
+Viết code là phần dễ nhất của việc build feature. Phần khó là biết
+**viết cái gì, theo thứ tự nào, với constraint gì**. AI tăng tốc phần
+viết — nếu bạn không biết rõ 3 thứ trên, AI chỉ giúp bạn sinh ra rác
+nhanh hơn.
+
+Bài này là playbook 4 pha để đi từ ticket đến PR merge, với AI đóng vai
+trò khác nhau ở mỗi pha.
+
+---
+
+## 1. Vấn đề của "cho AI 1 prompt dài rồi hy vọng"
+
+Sai lầm kinh điển khi bắt đầu với agent:
+
+```text
+Prompt: "Implement feature comment cho blog posts.
+         User có thể comment, reply, like.
+         Có moderation, spam detection, email notify."
+```
+
+Agent chạy 40 phút, edit 30 file, tạo 5 table database, install 8
+package. Kết quả:
+
+- UI xấu (không match design system có sẵn).
+- Table schema "gần đúng" nhưng miss field bạn dùng ở chỗ khác.
+- Spam detection dùng lib lạ không ai biết.
+- Test coverage 20%.
+- Review PR này = rewrite 70%.
+
+Tại sao? Vì 1 prompt mơ hồ **không phải là feature spec**. Nó là wish
+list.
+
+Workflow đúng: chia thành 4 pha, mỗi pha có deliverable rõ, AI đóng
+vai phù hợp.
+
+---
+
+## 2. Tổng quan 4 pha
+
+```text
+┌─────────────────────────────────────────────────────┐
+│  Ticket (mơ hồ) ──► Feature shipped                 │
+│                                                     │
+│  Pha 1: PLAN       Vai AI: consultant                │
+│  Pha 2: SCAFFOLD   Vai AI: generator                 │
+│  Pha 3: BUILD      Vai AI: pair programmer           │
+│  Pha 4: POLISH     Vai AI: reviewer + test writer    │
+└─────────────────────────────────────────────────────┘
+```
+
+Mỗi pha có:
+
+- **Input**: output của pha trước.
+- **Deliverable**: thứ cụ thể sẽ review trước khi sang pha sau.
+- **Gate**: không được skip sang pha sau nếu gate chưa pass.
+
+Cứng vậy nghe chậm nhưng thực tế **tổng thời gian ngắn hơn** "all-in-one
+prompt" vì ít rework.
+
+---
+
+## 3. Pha 1: PLAN — AI là consultant
+
+### Mục tiêu
+
+Biến ticket mơ hồ thành **plan có cấu trúc**: hiểu scope, xác định file
+touch, quyết định approach, list risk.
+
+### Input
+
+- Ticket (text)
+- Acceptance criteria
+- Codebase context (nếu có — xem [bài onboard
+  codebase](/blog/understanding-codebase-with-ai))
+
+### Chat mode, không agent mode
+
+Plan pha này **KHÔNG edit code**. Chỉ discuss. Dùng chat mode (hoặc
+Plan mode trong Cursor).
+
+### Prompt template
+
+```text
+"Tôi cần implement [feature name] theo ticket sau:
+[paste ticket]
+
+Codebase hiện tại: [stack, tech chính]
+
+Trước khi code, tôi cần bạn:
+1. Summary ticket theo cách bạn hiểu (check tôi communicate đúng chưa)
+2. List file/folder sẽ touch, phân loại:
+   - File tạo mới
+   - File edit
+   - File đọc tham khảo (không edit)
+3. 2-3 approach khác nhau, pros/cons mỗi cái
+4. Risk / open question cần tôi quyết định
+5. KHÔNG code. Chỉ plan.
+
+Nếu ticket thiếu info, hỏi tôi trước khi tiếp tục."
+```
+
+Gạch đầu cuối quan trọng: **"KHÔNG code"** + **"hỏi tôi trước"**. Không
+có → agent sẽ sốt ruột nhảy vào implement.
+
+### Deliverable
+
+Plan markdown, commit vào `.specs/<feature>.plan.md` hoặc trong
+project tracker. Ví dụ:
+
+```markdown
+# Feature: Comment System
+
+## Approach chosen
+
+Vertical slice: bắt đầu bằng comment đơn giản (text only, không reply),
+ship → iterate. Không build full spec 1 lần.
+
+## Files
+
+- CREATE: src/db/schemas/comments.ts
+- CREATE: src/api/comments.ts
+- CREATE: src/components/CommentList.astro
+- EDIT: src/pages/posts/[slug].astro (mount CommentList)
+- EDIT: src/content.config.ts (add allowComments frontmatter)
+
+## Risks
+
+- R1: Spam — defer sang v2, chỉ log warning
+- R2: Moderation — manual qua admin UI, không auto
+
+## Open questions
+
+- Q1: DB table riêng hay JSON column trên posts? → chọn table riêng
+  (dễ query, index)
+```
+
+### Gate
+
+Bạn **đọc plan**, fix những chỗ AI hiểu sai hoặc assumption lệch. Plan
+OK → sang pha 2.
+
+---
+
+## 4. Pha 2: SCAFFOLD — AI là generator
+
+### Mục tiêu
+
+Dựng khung: file structure, type definition, function signature, test
+stub. **Chưa implement logic**.
+
+### Vì sao scaffold trước?
+
+- Bạn thấy shape của feature rõ ràng trước khi viết logic.
+- AI implement logic tốt hơn khi có type ràng buộc sẵn.
+- Review từng bước dễ hơn review 1 PR 500 dòng.
+
+### Prompt template
+
+```text
+"Dựa vào plan ở @.specs/comment-system.plan.md, scaffold các file sau.
+
+Yêu cầu:
+- Chỉ type + function signature + empty body (throw 'Not implemented')
+- Với mỗi function, thêm JSDoc comment ngắn mô tả input/output
+- Tạo test file song song với file logic, mỗi function 1 empty test
+- KHÔNG implement logic
+- Match code style của project (@src/lib/format.ts làm reference)"
+```
+
+### Output mẫu
+
+```ts
+export interface Comment {
+  id: string;
+  postSlug: string;
+  author: string;
+  content: string;
+  createdAt: Date;
+}
+
+export async function createComment(
+  input: Omit<Comment, 'id' | 'createdAt'>
+): Promise<Comment> {
+  throw new Error('Not implemented');
+}
+
+export async function listComments(postSlug: string): Promise<Comment[]> {
+  throw new Error('Not implemented');
+}
+```
+
+```ts
+describe('createComment', () => {
+  it('creates a comment with required fields', () => {});
+  it('throws on empty content', () => {});
+  it('generates unique id', () => {});
+});
+```
+
+### Gate
+
+Review scaffold — type đủ chưa, signature hợp lý không, test case cover
+behavior chính chưa? Thấy sai → fix ngay (scaffold fix nhanh, đừng để
+trôi sang pha build).
+
+---
+
+## 5. Pha 3: BUILD — AI là pair programmer
+
+### Mục tiêu
+
+Implement logic. Mỗi function một lần, test pass mỗi lần.
+
+### Nguyên tắc: vertical slice, không horizontal layer
+
+```text
+❌ BAD — horizontal
+  Step 1: Implement toàn bộ database layer
+  Step 2: Implement toàn bộ API layer
+  Step 3: Implement toàn bộ UI
+  → Gần cuối mới integrate, phát hiện schema sai → rework.
+
+✅ GOOD — vertical
+  Step 1: Implement 1 hành vi end-to-end (create 1 comment → hiển thị)
+  Step 2: Thêm hành vi 2 (list comments)
+  Step 3: Thêm hành vi 3 (delete)
+  → Mỗi step có demo, feedback sớm.
+```
+
+### Prompt template (1 function 1 lần)
+
+```text
+"Implement function createComment trong @src/api/comments.ts.
+
+Requirement:
+- Validate input (content không rỗng, author không rỗng)
+- Generate UUID cho id
+- Set createdAt = now
+- Insert vào DB qua @src/db/client.ts
+
+Test cases ở @src/api/comments.test.ts phải pass.
+
+Sau khi implement, chạy test. Report kết quả."
+```
+
+Giới hạn scope → AI focus, dễ review, test verify được.
+
+### Agent mode OK tại đây
+
+Pha này bạn để agent chạy level 3 (với approval) hoặc level 4 (auto) tùy
+độ tin. Có test → có gate objective. Agent không thể "cheat" bằng cách
+tự xóa test fail được (vì bạn review diff).
+
+### Checkpoint giữa chừng
+
+Mỗi 2-3 function build xong:
+
+1. Commit (hoặc ít nhất stage).
+2. Chạy test **toàn bộ** (không chỉ file vừa edit).
+3. Nếu có dev server, browser-check feature đang build.
+
+### Gate
+
+- Test pass toàn bộ (không chỉ test mới).
+- Lint / type-check clean.
+- Feature demo được (end-to-end vertical slice).
+
+---
+
+## 6. Pha 4: POLISH — AI là reviewer
+
+### Mục tiêu
+
+Xử lý edge case, accessibility, error handling, docs. Những thứ dev
+hay skip vì "nó work rồi".
+
+### AI review chính code vừa viết
+
+```text
+"Review @src/api/comments.ts với góc nhìn sau:
+1. Edge case: input rỗng, input quá dài, SQL injection, XSS
+2. Error handling: có chỗ nào swallow error không?
+3. Performance: query N+1? Miss index?
+4. Security: validate input ở đâu? Rate limit?
+5. Accessibility (nếu có UI): aria label, keyboard nav
+
+Chỉ report issue, KHÔNG tự fix. Tôi sẽ quyết định fix cái nào."
+```
+
+Yêu cầu "không tự fix" quan trọng — bạn muốn **list** để bạn prioritize,
+không phải AI tự quyết định nên fix gì.
+
+### Viết thêm test
+
+Với issue tìm được, viết test **trước khi fix**:
+
+```text
+"Thêm test cho @src/api/comments.test.ts cover các case:
+- Content > 5000 ký tự → reject
+- Content chứa <script> → sanitize (không block)
+- 10 request đồng thời từ 1 user → chỉ 1 pass (rate limit)
+
+Implement test trước, verify fail, rồi tôi sẽ implement fix."
+```
+
+TDD với AI → tự tin hơn nhiều so với fix rồi viết test.
+
+### Viết docs cuối cùng
+
+```text
+"Update @README.md mục 'Comments system':
+- Cách enable comment cho 1 post
+- Cách xóa comment (admin)
+- Giới hạn (5000 ký tự, rate limit 10/phút)
+
+Format match style hiện tại của README."
+```
+
+### Gate
+
+- Test coverage hợp lý (không phải 100%, nhưng cover path chính).
+- Manual test UI browser.
+- Docs update.
+- Self-review diff 1 lượt.
+
+---
+
+## 7. Task decomposition — nghệ thuật chia nhỏ
+
+Feature 1 tuần = 5 ticket nhỏ hơn, không phải 1 ticket lớn.
+
+### Ngưỡng chia
+
+Rule of thumb:
+
+- **< 1 giờ work** → 1 ticket, 1 PR.
+- **1-4 giờ** → 1 ticket, có thể chia 2 PR (scaffold + impl).
+- **> 4 giờ** → chia thành subtask.
+
+Ví dụ Comment feature chia ra:
+
+```text
+Week feature: Comment system
+
+├── Ticket 1: DB schema + migration (2h)
+├── Ticket 2: API create + list comments (3h)
+├── Ticket 3: UI render + submit form (4h)
+├── Ticket 4: Moderation admin page (3h)
+└── Ticket 5: Rate limit + spam filter (2h)
+```
+
+Mỗi ticket là 1 PR ngắn, review được trong 10 phút. Merge liên tục →
+feedback liên tục → ít rework.
+
+### Dấu hiệu ticket quá to
+
+- Plan pha 1 dài > 1 trang.
+- Pha 2 scaffold > 10 file.
+- Bạn tự nghĩ "để làm xong rồi PR 1 lần cho đỡ phiền".
+
+Thấy 1 trong 3 → **chia nhỏ**, ngay cả khi mất công tạo thêm ticket.
+
+---
+
+## 8. Anti-patterns phổ biến
+
+### ❌ 8.1. Bỏ qua Pha 1 vì "ticket rõ rồi"
+
+Ticket tưởng rõ, đọc kỹ lại thiếu: auth requirement? format date?
+timezone? permissions?
+
+Pha 1 không phải cho AI — mà cho **chính bạn** forced-think trước khi
+code. 15 phút pha 1 cứu 3 giờ pha 3.
+
+### ❌ 8.2. Scaffold xong nhảy thẳng implement full
+
+Scaffold → build **1 function** → test pass → build function tiếp theo.
+Đừng "implement all 10 function rồi test toàn bộ cuối cùng".
+
+### ❌ 8.3. Accept tất cả diff AI mà không đọc
+
+AI pha 3 edit 5 file. Bạn bấm "Accept all" → miss 1 file mà AI đã
+install dep mới không cần.
+
+**Rule**: đọc **mọi file diff** trước khi accept. Không có ngoại lệ.
+
+### ❌ 8.4. Test "nhìn có vẻ đúng" là đủ
+
+AI gen test. Bạn chạy → pass. Nhưng test thực chất chỉ
+`expect(true).toBe(true)` trá hình. Hoặc test không cover behavior chính.
+
+**Fix**: đọc test như đọc code production. Test viết dở = coverage giả.
+
+### ❌ 8.5. Không commit giữa chừng
+
+Pha 3 chạy 2 giờ không commit. Pha 4 AI edit nhầm, muốn rollback →
+mất 2 giờ.
+
+**Commit sau mỗi vertical slice**. Dùng `git commit -m "wip: ..."` nếu
+ngại viết message đẹp.
+
+---
+
+## 9. Prompt templates dùng đi dùng lại
+
+Lưu sẵn trong Cursor Skill hoặc snippet manager:
+
+### Template: "Plan before build"
+
+```text
+"Trước khi code, plan task sau theo format markdown:
+- Understanding: bạn hiểu ticket thế nào
+- Files: tạo mới / edit / chỉ đọc
+- Approach: 2 options + pros/cons
+- Risks + open questions
+
+KHÔNG code. Hỏi tôi nếu có gì mơ hồ."
+```
+
+### Template: "Scaffold only"
+
+```text
+"Scaffold các file cần thiết cho task này:
+- Type + signature + empty body (throw not-implemented)
+- Test stub với describe/it, empty test
+- Match code style @<reference file>
+
+KHÔNG implement logic."
+```
+
+### Template: "Implement one thing"
+
+```text
+"Implement function <name> trong <file>.
+Requirement: <list rõ ràng>.
+Test cases ở <test file> phải pass.
+Sau khi xong, chạy test và report. KHÔNG edit file khác."
+```
+
+### Template: "Review my code"
+
+```text
+"Review file <path> với góc nhìn:
+1. Edge cases
+2. Error handling
+3. Performance
+4. Security
+
+Report issue, KHÔNG tự fix."
+```
+
+---
+
+## 10. Workflow 1 feature thật — tôi vừa làm xong
+
+Feature: thêm view count cho blog post. Ticket 3 dòng.
+
+### Pha 1 (15 phút)
+
+Plan: schema cần thêm table `post_views`, API `POST /api/view`, client
+fire khi mount, debounce. Risk: bot đếm → cần filter user agent.
+
+### Pha 2 (10 phút)
+
+AI scaffold 4 file: schema, API, client hook, test. Tôi review — OK,
+chỉ fix lại tên variable cho consistent.
+
+### Pha 3 (45 phút)
+
+AI implement từng function. 2 round test fail → AI fix → pass. Tôi
+review diff mỗi function.
+
+### Pha 4 (30 phút)
+
+AI review: tìm ra 2 issue (race condition khi user refresh rất nhanh,
+không filter bot). Tôi viết 2 test mới, AI fix, test pass.
+
+**Total: 1h 40min** từ ticket đến ready-to-PR. Không dùng AI chắc tôi
+mất ~3 giờ cho feature tương tự.
+
+Quan trọng: **tôi review toàn bộ diff, hiểu toàn bộ code**. Nếu production
+có bug, tôi debug được — không phải "AI làm, tôi không biết gì".
+
+---
+
+## 11. Tổng kết
+
+Ship feature với AI nhanh là kỹ năng. 4 pha — plan, scaffold, build,
+polish — là framework để train kỹ năng đó. Key takeaway:
+
+1. **Plan riêng, code riêng**: chat mode cho plan, agent mode cho code.
+2. **Scaffold trước implement**: thấy shape → AI implement chính xác hơn.
+3. **Vertical slice**: ship end-to-end 1 hành vi, không horizontal layer.
+4. **Review diff mọi lúc**: không bao giờ "accept all" mà không đọc.
+5. **Chia nhỏ**: ticket 4+ giờ → chia thành subtask.
+6. **Test là gate**: không merge khi test đỏ, không trust test AI viết
+   mà không review.
+
+Bài tiếp theo sẽ đi vào debug — lĩnh vực AI đặc biệt hữu ích nhưng
+cũng dễ lead astray nếu bạn không cấu trúc workflow.
+
+---
+
+### Đọc thêm
+
+- [Working with Coding Agents](/blog/working-with-coding-agents)
+- [Understanding Codebase with AI](/blog/understanding-codebase-with-ai)
+- [Cursor Skills](/blog/cursor-skills-beginner-guide) — đóng gói 4 pha
+  thành skill tái dùng
+- [Cursor Sub-agents](/blog/cursor-sub-agents-guide) — delegate từng pha
+  cho sub-agent
+- Cursor Learn course ([cursor.com/learn](https://cursor.com/learn)) —
+  reference bổ sung tiếng Anh

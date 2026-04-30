@@ -1,0 +1,674 @@
+---
+title: 'Agent Architecture — Bên trong 1 AI agent là gì'
+description: 'Mổ xẻ kiến trúc bên trong 1 AI agent: agent loop, tool use mechanics, 3 tầng memory, planning patterns (ReAct, Plan-and-Execute, Tree of Thoughts), multi-agent system, và 7 cạm bẫy phổ biến.'
+pubDate: 2026-04-30
+tags: [ai, agent, architecture, llm, tool-use, planning]
+draft: false
+---
+
+Bạn dùng Cursor agent, Claude Computer Use, Devin — và cảm giác chúng
+"thông minh như người". Nhưng bên trong, agent là 1 hệ thống đơn giản
+hơn bạn nghĩ: **vài component LLM-driven xếp thành loop**.
+
+Bài này mổ xẻ kiến trúc đó. Sau khi đọc, bạn không chỉ biết cách dùng
+agent — mà còn build agent của riêng mình, và biết tại sao agent
+thỉnh thoảng "ngu" (vì lý do kỹ thuật cụ thể, không phải magic).
+
+---
+
+## 1. Agent là gì — định nghĩa kỹ thuật
+
+**Agent là chương trình dùng LLM trong vòng lặp để hoàn thành task
+qua nhiều bước, có khả năng tương tác với môi trường.**
+
+3 yếu tố tách agent khỏi chatbot thường:
+
+|        | Chatbot                  | Agent                               |
+| ------ | ------------------------ | ----------------------------------- |
+| Input  | 1 message                | 1 task / goal                       |
+| Output | 1 reply                  | Sequence của action + result        |
+| Bước   | 1 lượt                   | N lượt (loop)                       |
+| Tool   | Không / hạn chế          | Read/write file, terminal, API, web |
+| State  | Stateless / context-only | Có memory, planning                 |
+
+Cursor đang gõ code cho bạn = agent. Claude trả lời câu hỏi = chatbot.
+ChatGPT với "Code Interpreter" = agent (chạy Python trong sandbox).
+
+---
+
+## 2. Agent loop — vòng lặp cơ bản
+
+Mọi agent kiến trúc hiện đại đều có chung skeleton:
+
+```text
+┌──────────────────────────────────────┐
+│  1. OBSERVE — đọc state hiện tại       │
+│     (file, terminal output, tool result) │
+├──────────────────────────────────────┤
+│  2. THINK — LLM reasoning              │
+│     (next action là gì? đã xong chưa?)  │
+├──────────────────────────────────────┤
+│  3. ACT — execute action               │
+│     (call tool, edit file, run command) │
+├──────────────────────────────────────┤
+│  4. CHECK — task done? loop back to 1.  │
+└──────────────────────────────────────┘
+```
+
+Pseudo-code:
+
+```typescript
+async function agentLoop(task: string) {
+  let history = [{ role: 'user', content: task }];
+
+  while (true) {
+    // OBSERVE + THINK: gửi history + tools cho LLM
+    const response = await llm.chat({
+      messages: history,
+      tools: availableTools,
+    });
+
+    history.push(response.message);
+
+    // Stop condition
+    if (response.finishReason === 'stop') {
+      return response.message.content;
+    }
+
+    // ACT: thực thi tool calls
+    if (response.message.toolCalls) {
+      for (const call of response.message.toolCalls) {
+        const result = await executeTool(call);
+        history.push({
+          role: 'tool',
+          toolCallId: call.id,
+          content: result,
+        });
+      }
+    }
+  }
+}
+```
+
+15 dòng code. Đây là **toàn bộ logic** của 1 agent đơn giản. Phần còn
+lại là tool definition + prompt engineering.
+
+---
+
+## 3. Components — 4 phần cấu thành agent
+
+### 3.1. Brain — LLM
+
+Phần "thinking" của agent. Quyết định:
+
+- Task này hiểu ra sao
+- Tool nào nên call tiếp theo
+- Khi nào dừng
+
+LLM brain quan trọng nhất. Agent quality phụ thuộc 70% vào model
+chọn (xem [Models Comparison](/blog/llm-models-comparison-guide)).
+
+### 3.2. Tools — interface với thế giới
+
+Tool là **function** model có thể gọi. Định nghĩa qua JSON schema:
+
+```json
+{
+  "name": "read_file",
+  "description": "Read content of a file from the workspace",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "Absolute path to file"
+      }
+    },
+    "required": ["path"]
+  }
+}
+```
+
+LLM nhận schema này như 1 phần của system prompt. Khi cần file content,
+nó output:
+
+```json
+{
+  "tool": "read_file",
+  "arguments": { "path": "/src/index.ts" }
+}
+```
+
+Runtime parse, execute hàm thật, gửi kết quả về làm input cho lượt
+tiếp theo.
+
+**Tool types phổ biến cho coding agent:**
+
+- File: `read_file`, `write_file`, `delete_file`, `glob`, `grep`
+- Shell: `run_command` (sandboxed)
+- Web: `fetch_url`, `web_search`
+- Code analysis: `read_lints`, `find_references`, `goto_definition`
+- Sub-agent: `delegate_task` (xem section 6)
+
+### 3.3. Memory — bộ nhớ
+
+3 tầng memory:
+
+```text
+┌─────────────────────────────────────┐
+│  WORKING MEMORY                     │
+│  Conversation history hiện tại        │
+│  → giới hạn theo context window     │
+├─────────────────────────────────────┤
+│  EPISODIC MEMORY                    │
+│  Tóm tắt task trước, decision đã     │
+│  → store ngoài (file, DB), recall   │
+├─────────────────────────────────────┤
+│  SEMANTIC MEMORY                    │
+│  Knowledge về codebase, convention   │
+│  → vector DB hoặc preloaded rule     │
+└─────────────────────────────────────┘
+```
+
+Cursor:
+
+- **Working** = chat hiện tại
+- **Episodic** = `agent-transcripts/` folder
+- **Semantic** = Rules + Skills + indexed codebase
+
+### 3.4. Planning module
+
+Đơn giản: LLM brain tự plan inline. Phức tạp: planning module riêng
+biệt (xem section 5).
+
+---
+
+## 4. Tool use — sâu hơn
+
+### 4.1. Function calling vs free-form
+
+2 cách model "call tool":
+
+**Function calling** (modern, structured):
+
+```json
+Model output:
+{
+  "tool_calls": [
+    { "name": "read_file", "args": {...} }
+  ]
+}
+```
+
+API parse JSON tự động. Type-safe, ít hallucinate parameter.
+
+**Free-form parsing** (legacy):
+
+```text
+Model output:
+"I'll read the file. <action>read_file('src/index.ts')</action>"
+```
+
+Runtime regex extract. Dễ fail (model output sai format).
+
+Modern API (Anthropic, OpenAI) dùng function calling. Còn dùng
+free-form chỉ khi model không support (Llama base, model nhỏ).
+
+### 4.2. Tool result format
+
+Tool result phải **đầy đủ + structured**:
+
+```typescript
+// ❌ Bad
+return 'ok';
+
+// ✅ Good
+return JSON.stringify({
+  success: true,
+  fileContents: '...',
+  fileSize: 1234,
+  encoding: 'utf8',
+});
+```
+
+Model học từ kết quả này. Format consistent → model behavior
+predictable.
+
+### 4.3. Tool error handling
+
+Tool fail (file không tồn tại, command exit code khác 0) → trả về
+error có **structure**:
+
+```json
+{
+  "error": true,
+  "code": "FILE_NOT_FOUND",
+  "message": "File /src/foo.ts does not exist",
+  "suggestion": "Use glob_search to find similar files"
+}
+```
+
+Model đọc error → quyết định: retry, đổi approach, hỏi user. Không
+nên throw raw exception → agent loop crash.
+
+### 4.4. Tool security — sandboxing
+
+Tool có thể làm hại system. Best practice:
+
+- **Filesystem write**: giới hạn workspace folder. Block ghi `/etc/`,
+  `~/.ssh/`.
+- **Shell exec**: timeout, mem limit, no network unless explicit.
+- **Network**: allowlist domain, không free internet.
+- **Approval**: tool nguy hiểm (delete, force push) → ask user.
+
+Cursor dùng sandbox với "permission" gradient: read freely, write
+yêu cầu cẩn thận, network/all yêu cầu user approve.
+
+---
+
+## 5. Planning patterns
+
+LLM brain tự plan đơn giản. Nhưng task phức tạp cần pattern formal:
+
+### 5.1. ReAct (Reasoning + Acting)
+
+Pattern phổ biến nhất. Trong mỗi turn:
+
+```text
+Thought: "Tôi cần đọc file X để hiểu structure"
+Action: read_file("/src/index.ts")
+Observation: <file content>
+Thought: "OK, structure đã rõ. Bây giờ cần edit ..."
+Action: write_file(...)
+...
+```
+
+Mỗi step model **explicit reasoning** trước action. Dễ debug, dễ
+audit. Cursor agent dùng pattern này (visible trong "thinking").
+
+**Limitation**: reasoning step đốt token. Task dài → cost cao.
+
+### 5.2. Plan-and-Execute
+
+Tách 2 phase:
+
+1. **Plan**: model output 1 plan rõ ràng (5-10 step) cho task.
+2. **Execute**: agent đi theo plan từng step, không re-plan.
+
+```text
+PHASE 1 — Plan:
+  1. Read existing implementation
+  2. Read test file
+  3. Identify gap
+  4. Implement fix
+  5. Run test
+  6. Verify pass
+
+PHASE 2 — Execute step 1, 2, 3, 4, 5, 6.
+```
+
+**Ưu**: token-efficient, agent không "lạc".
+**Nhược**: rigid, error giữa chừng → cần re-plan.
+
+Solution thực tế: **hybrid** — execute, nếu phát hiện lệch plan, replan
+phần còn lại.
+
+### 5.3. Tree of Thoughts
+
+Cho task có nhiều path khả thi (debug, search). Model:
+
+1. Generate **3-5 candidate** approach.
+2. Evaluate từng approach (LLM judge).
+3. Chọn best, execute.
+4. Nếu fail, revisit branch khác.
+
+Đắt (gấp 3-5x token) nhưng correctness cao hơn cho task khó.
+
+### 5.4. Reflection
+
+Sau khi finish task:
+
+```text
+Thought: "Tôi vừa implement feature. Review:
+- Có miss edge case nào không?
+- Có vi phạm convention nào?
+- Có làm broke test nào không?"
+
+Action: run_test
+Action: re-read code
+
+Thought: "Tôi miss case empty array. Fix..."
+```
+
+Self-reflection cải thiện chất lượng output 10-30% trên benchmark.
+Đổi lại: gấp đôi cost.
+
+### 5.5. So sánh
+
+| Pattern          | Cost       | Quality | Use case                  |
+| ---------------- | ---------- | ------- | ------------------------- |
+| ReAct            | Trung bình | Tốt     | Default cho mọi task      |
+| Plan-and-Execute | Thấp       | Tốt     | Task structure rõ         |
+| Tree of Thoughts | Cao        | Rất tốt | Debug, optimization       |
+| Reflection       | Cao (2x)   | Tốt+    | Critical task, production |
+
+---
+
+## 6. Sub-agents — agent gọi agent
+
+Khi 1 agent quá tải (context dài, task heterogeneous), giải pháp là
+**delegate** task con cho sub-agent riêng.
+
+```text
+PARENT AGENT (project context, user intent)
+    │
+    ├──► Sub-agent: "Read 50 file & summarize architecture"
+    │     → Return: 1 page summary
+    │
+    ├──► Sub-agent: "Run test suite & report failures"
+    │     → Return: list of failing tests
+    │
+    └──► Sub-agent: "Search docs about X"
+          → Return: 3 relevant snippets
+```
+
+### Lợi ích
+
+1. **Context isolation**: sub-agent đọc 100KB file, parent chỉ thấy
+   2KB summary. Parent context không bloat.
+2. **Specialization**: sub-agent có system prompt riêng (vd "you are
+   doc reader, return only quotes").
+3. **Parallel**: nhiều sub-agent chạy đồng thời.
+
+### Cost
+
+Sub-agent = thêm LLM call. Nếu task không cần isolation, đơn giản hơn
+là parent tự làm.
+
+Heuristic: dùng sub-agent khi task con sẽ đốt > 5K token, hoặc cần
+context không liên quan task chính.
+
+Cursor có 5 loại sub-agent built-in: `generalPurpose`, `explore`,
+`shell`, `cursor-guide`, `best-of-n-runner`.
+
+Đọc thêm: [Cursor Sub-agents Guide](/blog/cursor-sub-agents-guide).
+
+---
+
+## 7. Multi-agent systems
+
+Khác với "sub-agent" (parent-child, hierarchical), **multi-agent** là
+nhiều agent **đồng cấp**, hợp tác hoặc cạnh tranh.
+
+### 7.1. Cooperative — chia việc
+
+Pattern: mỗi agent có role, làm phần của mình.
+
+```text
+PRODUCT MANAGER agent ──► spec
+       │
+       ▼
+ARCHITECT agent ──────► design doc
+       │
+       ▼
+ENGINEER agent ──────► code
+       │
+       ▼
+QA agent ────────────► test report
+```
+
+Framework support: **AutoGen** (Microsoft), **CrewAI**, **LangGraph**.
+
+**Ưu**: phân chia rõ, dễ debug.
+**Nhược**: rigid, communication overhead, dễ tạo "echo chamber" — các
+agent confirm nhau sai.
+
+### 7.2. Adversarial — kiểm tra chéo
+
+```text
+PROPOSER agent: "Đây là code"
+CRITIC agent: "Có 3 vấn đề: ..."
+PROPOSER: "Đã fix: ..."
+CRITIC: "OK, no issue."
+```
+
+Pattern này cải thiện quality. Critic agent với system prompt khác
+proposer (skeptical persona) → catch lỗi proposer miss.
+
+GitHub Copilot Workspace dùng pattern này khi tạo PR — 1 agent code,
+1 agent review.
+
+### 7.3. Khi nào không nên multi-agent
+
+Multi-agent **không phải** silver bullet. Bạn không cần:
+
+- Single-step task ("rename variable")
+- Task đã rõ flow (1 agent đủ)
+- Khi cost / latency là constraint
+
+90% task dùng 1 agent + tools là đủ. Multi-agent thường là
+over-engineering trừ khi có lý do cụ thể.
+
+---
+
+## 8. 7 cạm bẫy phổ biến
+
+### 8.1. Context bloat
+
+Agent loop dài → history đầy → cost cao + "lost in middle". Fix:
+
+- Summarize history định kỳ
+- Drop tool result cũ không relevant
+- Restart loop với tóm tắt khi cần
+
+### 8.2. Tool hallucination
+
+Model gọi tool không có ("call API X") hoặc gọi với param sai schema.
+
+Fix:
+
+- Strict schema validation runtime
+- Tool description rõ ràng
+- Few-shot example trong system prompt
+
+### 8.3. Infinite loop
+
+Agent repeat 1 action mãi (đặc biệt khi tool fail và model không hiểu
+tại sao).
+
+Fix:
+
+- Max steps cap (ví dụ 30 step / task)
+- Detect repeated action → force model thử cách khác
+- Better error message từ tool
+
+### 8.4. Premature stop
+
+Agent dừng giữa task ("I think I'm done"). Thường do system prompt
+không rõ "done condition".
+
+Fix:
+
+- System prompt explicit: "Stop only when X is verified"
+- Verification step ở cuối (chạy test, check output)
+
+### 8.5. Tool over-use
+
+Agent call read_file 50 lần khi chỉ cần 5. Token waste.
+
+Fix:
+
+- Glob/grep trước, sau đó read file targeted
+- Cache tool result trong cùng turn
+- Hint trong system prompt: "Use grep before reading multiple files"
+
+### 8.6. Off-task drift
+
+Task: fix bug X. Agent end up: refactor function Y, install package Z.
+
+Fix:
+
+- Constraint cứng trong prompt: "DON'T modify files outside scope"
+- Plan-first pattern (lên plan, user approve, execute strict)
+
+### 8.7. Catastrophic action
+
+Agent run `rm -rf ./` hoặc force push main. Hiếm nhưng đã xảy ra (xem
+"Replit AI deletes prod database" 2025).
+
+Fix:
+
+- Sandboxing ở nhiều layer
+- Approval cho destructive action
+- Backup automation
+- Run agent trên branch riêng, không direct main
+
+---
+
+## 9. Build agent đơn giản từ scratch
+
+200 dòng TypeScript, 1 agent đầy đủ:
+
+```typescript
+import Anthropic from '@anthropic-ai/sdk';
+import { readFileSync, writeFileSync } from 'fs';
+import { execSync } from 'child_process';
+
+const client = new Anthropic();
+
+const tools = [
+  {
+    name: 'read_file',
+    description: 'Read file content',
+    input_schema: {
+      type: 'object',
+      properties: { path: { type: 'string' } },
+      required: ['path'],
+    },
+  },
+  {
+    name: 'write_file',
+    description: 'Write content to file',
+    input_schema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string' },
+        content: { type: 'string' },
+      },
+      required: ['path', 'content'],
+    },
+  },
+  {
+    name: 'run_command',
+    description: 'Execute shell command (sandboxed)',
+    input_schema: {
+      type: 'object',
+      properties: { command: { type: 'string' } },
+      required: ['command'],
+    },
+  },
+];
+
+function executeTool(name: string, args: any): string {
+  if (name === 'read_file') {
+    return readFileSync(args.path, 'utf8');
+  }
+  if (name === 'write_file') {
+    writeFileSync(args.path, args.content);
+    return `Wrote ${args.content.length} bytes to ${args.path}`;
+  }
+  if (name === 'run_command') {
+    return execSync(args.command, { encoding: 'utf8' });
+  }
+  throw new Error(`Unknown tool: ${name}`);
+}
+
+async function agent(task: string) {
+  const messages: any[] = [{ role: 'user', content: task }];
+
+  for (let i = 0; i < 30; i++) {
+    const response = await client.messages.create({
+      model: 'claude-3-5-sonnet-20241022',
+      max_tokens: 4096,
+      tools,
+      messages,
+    });
+
+    messages.push({ role: 'assistant', content: response.content });
+
+    if (response.stop_reason === 'end_turn') {
+      console.log('Done');
+      return;
+    }
+
+    const toolUses = response.content.filter((b) => b.type === 'tool_use');
+    const toolResults = toolUses.map((tu: any) => {
+      try {
+        const result = executeTool(tu.name, tu.input);
+        return {
+          type: 'tool_result',
+          tool_use_id: tu.id,
+          content: result,
+        };
+      } catch (e: any) {
+        return {
+          type: 'tool_result',
+          tool_use_id: tu.id,
+          content: `Error: ${e.message}`,
+          is_error: true,
+        };
+      }
+    });
+
+    messages.push({ role: 'user', content: toolResults });
+  }
+}
+
+await agent('Read package.json, count dependencies, write report to deps.md');
+```
+
+Đây là **lõi của Cursor** (rút gọn). Add: streaming, sandbox, memory,
+better tool, sub-agent, → bạn có Cursor 0.1.
+
+Hiểu code này = hiểu agent. Phần còn lại là engineering polish.
+
+---
+
+## 10. Tổng kết
+
+Agent không phải magic. Nó là:
+
+1. **LLM** (brain)
+2. **Tools** (interface với thế giới)
+3. **Loop** (observe → think → act)
+4. **Memory** (working + episodic + semantic)
+5. **Planning** (ReAct / Plan-Execute / Reflection / etc.)
+
+5 component này, đứa nào yếu → agent yếu phần đó.
+
+Cursor mạnh vì:
+
+- Brain: Claude 3.5+
+- Tools: 30+ tool integrated với IDE
+- Loop: refined sau hàng triệu request
+- Memory: agent transcripts + Rules + Skills + Codebase index
+- Planning: ReAct + sub-agent + reflection
+
+Bạn build agent của riêng mình → hiểu 5 trục này, optimize từng cái.
+Đừng "build LangChain wrapper" — hiểu native.
+
+---
+
+### Đọc thêm
+
+- [Working with Coding Agents](/blog/working-with-coding-agents)
+- [Cursor Sub-agents Guide](/blog/cursor-sub-agents-guide)
+- [Customizing AI Agents](/blog/customizing-ai-agents)
+- [MCP Architecture](/blog/mcp-model-context-protocol-architecture)
+
+### Reference
+
+- ReAct paper — Yao et al. 2022 ([arxiv.org/abs/2210.03629](https://arxiv.org/abs/2210.03629))
+- Tree of Thoughts — Yao et al. 2023
+- "Agents" framework comparison — [arxiv.org/abs/2308.11432](https://arxiv.org/abs/2308.11432)
+- Anthropic — "Building effective agents" blog post

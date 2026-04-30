@@ -1,0 +1,402 @@
+---
+title: 'Working with Coding Agents — Từ autocomplete đến "đồng nghiệp" AI'
+description: 'Coding agent khác autocomplete ở chỗ nào, agent loop (observe-think-act) hoạt động ra sao, 4 level autonomy, khi nào để agent tự chạy vs khi nào human-in-the-loop, và những sai lầm của dev mới chuyển sang workflow agent-based.'
+pubDate: 2026-04-30
+tags: [ai, coding-agent, cursor, claude-code, workflow, productivity]
+draft: false
+---
+
+5 năm trước, "AI coding" nghĩa là Copilot gợi ý đoạn code tiếp theo khi bạn
+gõ. Bây giờ nghĩa là bạn gõ "implement dark mode, xong push PR" rồi đi pha
+cà phê. Khoảng cách 5 năm đó là bước nhảy từ **completion** sang **agent**.
+
+Dev lần đầu chuyển sang workflow agent-based thường mắc 2 lỗi đối lập:
+
+- **Quá tin** → để agent tự chạy task phức tạp, merge thẳng không review.
+- **Quá dè** → vẫn dùng agent như autocomplete, không tận dụng được khả năng.
+
+Bài này nói về điểm cân bằng: agent là gì, hoạt động thế nào, và cách làm
+việc cùng nó mà không bị nó dắt mũi (cũng không kìm hãm nó).
+
+---
+
+## 1. Coding agent vs autocomplete — khác biệt bản chất
+
+Autocomplete (GitHub Copilot ghost text, Tabnine...) là **reactive**:
+
+```text
+Bạn gõ:  function calculateTax(
+Nó đoán: amount: number, rate: number): number {
+           return amount * rate;
+         }
+Bạn bấm Tab → accept.
+```
+
+1 vòng. Không state. Không tool. Không biết codebase ngoài file đang mở.
+
+Coding agent là **proactive**:
+
+```text
+Bạn gõ:  "Thêm field 'taxRate' vào user settings, tính tax tự động
+          ở checkout, viết test cover edge case tax = 0."
+
+Agent: Đọc src/models/user.ts      (tool: read file)
+       Đọc src/pages/checkout.ts    (tool: read file)
+       Search "calculateTax"         (tool: grep)
+       Thấy chưa có helper → viết mới
+       Chạy test                    (tool: shell)
+       Test fail ở edge case → fix
+       Chạy test lại → pass
+       Summarize thay đổi → trả về user
+```
+
+Nhiều vòng. Có state (nhớ đã đọc gì, làm gì). Có tool (đọc, ghi, chạy
+command, search). Có kế hoạch (decompose task phức tạp).
+
+Đây là sự khác biệt bản chất: **từ công cụ thành cộng sự**.
+
+---
+
+## 2. Agent loop — cỗ máy 3 nhịp
+
+Mọi AI agent đều chạy trên 1 vòng lặp 3 bước:
+
+```text
+          ┌──────────────────────────────────┐
+          │                                   │
+          ▼                                   │
+    ┌──────────┐     ┌──────────┐     ┌──────────┐
+    │ OBSERVE  │────▶│  THINK   │────▶│   ACT    │
+    │          │     │          │     │          │
+    │ Đọc kết  │     │ Phân tích│     │ Gọi tool │
+    │ quả từ   │     │ plan next│     │ hoặc trả │
+    │ tool /   │     │ step     │     │ lời user │
+    │ user     │     │          │     │          │
+    └──────────┘     └──────────┘     └──────────┘
+```
+
+- **Observe**: đọc file vừa edit, xem kết quả command vừa chạy, parse error
+  message, đọc reply của user.
+- **Think**: hiểu observation, quyết định bước tiếp theo. Đây là lúc model
+  "suy nghĩ" — với thinking mode thì ra output suy nghĩ dài, không thì
+  ẩn.
+- **Act**: gọi tool tiếp theo (edit file, run command, search...) hoặc
+  dừng để trả lời user.
+
+Loop chạy đến khi:
+
+- Task xong → agent trả kết quả cho user.
+- Hết budget (token, time) → agent dừng và summary.
+- Agent tự detect cần input của user → pause, hỏi, chờ.
+
+Hiểu loop này giúp bạn **debug** khi agent "đi lạc": xem lại observation
+của nó → thường bạn sẽ thấy nó hiểu sai 1 file nào đó → context từ đó sai
+theo.
+
+---
+
+## 3. Tools — cánh tay của agent
+
+Agent tự bản thân chỉ biết sinh text. Muốn đọc file, ghi file, chạy
+command → phải có **tool**.
+
+Mỗi tool là 1 function có schema:
+
+```text
+Tool: read_file
+  Input:  { path: string, start_line?: number, end_line?: number }
+  Output: { content: string, total_lines: number }
+
+Tool: edit_file
+  Input:  { path: string, old_string: string, new_string: string }
+  Output: { success: boolean, diff: string }
+
+Tool: run_shell
+  Input:  { command: string, cwd?: string }
+  Output: { stdout: string, stderr: string, exit_code: number }
+```
+
+Agent nhìn schema → biết có thể làm gì. Khi agent muốn edit file, nó output
+một **tool call** dạng JSON:
+
+```json
+{
+  "tool": "edit_file",
+  "path": "src/utils/tax.ts",
+  "old_string": "return amount * rate",
+  "new_string": "return Math.round(amount * rate * 100) / 100"
+}
+```
+
+IDE (Cursor, Cline...) parse JSON này → thực thi thật → trả kết quả về
+agent → agent observe → think tiếp.
+
+**Hệ quả quan trọng**: agent mạnh tới đâu phụ thuộc vào tool-set bạn cho
+nó. IDE không cho tool `run_shell` → agent không chạy test được. Không có
+MCP docs → agent đoán docs.
+
+---
+
+## 4. Level of autonomy — 4 nấc thang
+
+Không phải mọi task đều cần agent "tự chạy hết". Có 4 level autonomy, dev
+nên chọn tùy context:
+
+### Level 1: Ghost text / Completion
+
+Bạn gõ, AI gợi ý. Bạn quyết định Tab hay bỏ. **Agent không tự edit gì**.
+
+- **Dùng cho**: task nhỏ, lặp lại, bạn biết chính xác muốn gõ gì.
+- **Risk**: ~0. Bạn là last gate.
+
+### Level 2: Suggested edits (review before apply)
+
+Bạn mô tả, AI sinh ra **diff**. Bạn xem diff, accept/reject từng chunk.
+
+- **Dùng cho**: refactor 1 file, đổi signature, bug nhỏ.
+- **Risk**: thấp. Bạn vẫn review trước khi file thay đổi.
+
+### Level 3: Agent loop với confirmation
+
+Bạn giao task phức tạp. Agent chạy loop — nhưng **pause xin phép** trước
+mỗi tool có side-effect (edit file, run command).
+
+- **Dùng cho**: feature nhiều file, test-driven fix, migration nhỏ.
+- **Risk**: trung bình. Bạn nhìn thấy mỗi bước, có thể stop.
+
+### Level 4: Full autonomy
+
+Agent chạy tự do, không hỏi gì. Bạn review **kết quả cuối cùng** (thường
+qua PR).
+
+- **Dùng cho**: task well-defined + có test + có CI.
+- **Risk**: cao nếu task phức tạp. Agent có thể:
+  - Edit file không liên quan
+  - Install dep không cần thiết
+  - Xóa test "fail" thay vì fix code
+  - Commit secrets
+
+**Lời khuyên cá nhân**: level 3 là sweet spot cho 80% task. Level 4 chỉ
+dùng trong **sandboxed environment** (container / worktree riêng) và khi
+task có specification rõ ràng (ví dụ: "fix lint error trong file X theo
+rule Y").
+
+---
+
+## 5. Collaboration vs Takeover — 2 mental model
+
+Có 2 cách nghĩ về vai trò agent. Chọn đúng → năng suất tăng gấp đôi. Chọn
+sai → frustrating.
+
+### Model A: Agent là **junior dev**
+
+- Bạn là architect / reviewer.
+- Agent implement theo hướng dẫn.
+- Bạn check từng PR, feedback, cho làm lại.
+
+**Hợp với**: task cần correctness cao (payment, auth), domain phức tạp.
+
+### Model B: Agent là **đồng nghiệp ngang hàng**
+
+- Bạn và agent cùng bàn approach.
+- Bạn có thể nghe agent phản biện.
+- Chia task: bạn phần hairy, agent phần mechanical.
+
+**Hợp với**: greenfield code, prototype, research spike.
+
+### Model C: Agent là **công cụ** (không phải người)
+
+- Bạn dùng agent như IDE command.
+- Không "trò chuyện" — chỉ gửi task, nhận kết quả.
+- Đọc output như đọc `git diff`.
+
+**Hợp với**: task mechanical (rename, format, add type annotation).
+
+Không có model nào "đúng" tuyệt đối. Context-switch giữa các model mới là
+kỹ năng thực sự.
+
+---
+
+## 6. 6 sai lầm của dev mới chuyển sang agent workflow
+
+### ❌ 6.1. Prompt mơ hồ
+
+```text
+❌ "Fix bug"
+❌ "Refactor cho tốt hơn"
+❌ "Thêm tính năng notification"
+```
+
+Agent không có ESP. Nó sẽ đoán — và hallucinate.
+
+```text
+✅ "Bug: khi click nút Submit 2 lần liên tiếp, form gửi 2 request.
+    Expected: gửi 1 lần, disable button trong lúc pending.
+    File: src/pages/checkout.tsx line 45."
+```
+
+Rule of thumb: prompt agent như viết **ticket cho junior**.
+
+### ❌ 6.2. Không cung cấp context
+
+Agent không đọc được ý nghĩ của bạn. Không biết:
+
+- Project này ưu tiên convention gì.
+- Có constraint gì về dep (lock version, không cho add package).
+- Đã thử approach A/B chưa, vì sao không dùng.
+
+Giải pháp:
+
+- **Rules** cho convention bền vững.
+- **Skills** cho workflow lặp lại.
+- **File attach** (`@file`) cho context từng task.
+
+Đã viết chi tiết ở [Cursor Rules](/blog/cursor-rules-guide) và
+[Cursor Skills](/blog/cursor-skills-beginner-guide).
+
+### ❌ 6.3. Để agent chạy 100 bước không check
+
+Agent sai 1 bước sớm → 99 bước sau build trên assumption sai. Càng về sau
+càng khó rollback.
+
+**Check-in mỗi 5-10 tool call**. Cursor Plan mode / approval-required mode
+giúp ép nhịp nghỉ tự nhiên.
+
+### ❌ 6.4. Không đọc diff trước khi accept
+
+Agent edit 8 file. Bạn bấm "Accept all". 1 tháng sau có bug vì agent xóa
+1 function bạn không biết.
+
+Đọc từng file diff không phải overhead — đó là **core review skill**.
+
+### ❌ 6.5. Tranh luận với agent thay vì restart
+
+Agent đi sai → bạn prompt "không, thử cách khác" → agent thử cách dở hơn
+→ bạn prompt lại... 20 message sau context đầy rác, agent confuse thêm.
+
+**Với task sai hướng lớn: restart chat**, viết lại prompt rõ hơn. Nhanh
+hơn nhiều.
+
+### ❌ 6.6. Đánh mất skill code tay
+
+Hiện tượng này rất thật. Dev dùng agent 6 tháng rồi thử code tay →
+stuck ở những thứ cơ bản (dùng Array method nào, syntax destructuring
+nâng cao).
+
+**Giữ 20% thời gian code tay** — ít nhất với hàm core, logic khó. Đừng
+outsource hết.
+
+---
+
+## 7. Vibes-based vs Spec-based — 2 loại task agent
+
+Task cho agent chia làm 2 loại, xử lý khác nhau:
+
+### Vibes-based
+
+"Làm cho UI đẹp hơn", "code này có smell không?", "nghĩ giúp tao name cho
+hàm này".
+
+- Không có right answer tuyệt đối.
+- Chất lượng phụ thuộc **taste** của model.
+- Bạn cần **đối thoại** với agent, không giao task rồi biến mất.
+
+Approach: dùng chat mode, iterate nhanh, stop khi cảm thấy đủ.
+
+### Spec-based
+
+"Implement endpoint POST /users với validation Zod, return 201 + user
+object, 400 nếu email trùng."
+
+- Có right answer rõ ràng.
+- Chất lượng verify được bằng test.
+- Agent chạy level 3 hoặc 4 autonomy ổn.
+
+Approach: spec rõ + test case trước → giao agent → review PR.
+
+Biết phân biệt 2 loại giúp bạn **không dùng chat mode cho task spec-based**
+(chậm, manual) và **không dùng agent mode cho task vibes-based** (robotic,
+không có thẩm mỹ).
+
+---
+
+## 8. Khi nào KHÔNG nên dùng agent
+
+Agent workflow không phải silver bullet. Stick với code tay khi:
+
+- **Logic rất critical**: crypto, auth, payment. Agent hallucinate ở đây
+  = production incident.
+- **Code cần hiểu 100%**: onboarding codebase mới, leetcode interview prep,
+  nghiên cứu pattern mới.
+- **Codebase cực kỳ đặc thù**: nội bộ công ty, framework tự viết, agent
+  không có training data → hallucinate liên tục.
+- **Khi bạn mệt**: mệt → không review kỹ → merge sai → nợ technical. Tay
+  bạn chậm cũng không nguy hiểm bằng agent nhanh mà bạn không check.
+
+---
+
+## 9. Workflow 1 ngày với coding agent (như tôi đang làm)
+
+```text
+09:00 — Sáng:
+  Check inbox, Jira. Pick 2-3 ticket.
+  Ticket mechanical (refactor, add type): để agent level 3 xử lý.
+  Ticket core logic: planning + code tay.
+
+10:00 — Deep work:
+  Task phức tạp → Plan mode với agent:
+    - Agent research codebase (sub-agent)
+    - Agent propose plan
+    - Tôi review + điều chỉnh
+    - Switch Agent mode, chạy theo plan
+    - Tôi review diff, test
+
+12:00 — Lunch.
+
+13:00 — Afternoon:
+  Code review PR của team: tay + Cursor chat hỏi "explain this change"
+    khi PR phức tạp.
+  Debug production bug: Claude thinking mode, paste log + stacktrace.
+
+16:00 — Wrap up:
+  Viết docs / commit message: agent giúp draft, tôi edit.
+  Update Jira: agent có MCP Atlassian, tự update status.
+```
+
+Không hôm nào "agent làm hết". Nó là **1 trong nhiều tool** trong toolkit.
+
+---
+
+## 10. Tổng kết
+
+Coding agent không thay thế developer. Nó thay thế **một số cách làm việc**
+của developer. Cụ thể:
+
+- Cách **implement** việc cơ học → agent làm tốt hơn.
+- Cách **research** codebase lớn → agent nhanh hơn.
+- Cách **review** code AI sinh → đây là skill mới bạn phải rèn.
+
+Dev có giá trị trong kỷ nguyên agent không phải dev "viết code nhanh" —
+mà là dev biết:
+
+1. **Chia task** cho đúng level autonomy.
+2. **Prompt** rõ, spec chặt, context đủ.
+3. **Review** diff có chất lượng.
+4. **Biết khi nào code tay** là rẻ hơn agent.
+5. **Maintain** taste kỹ thuật để không bị lead astray.
+
+Các bài tiếp theo trong loạt này sẽ đi sâu vào từng kỹ năng đó: hiểu
+codebase qua agent, develop feature, debug, review, customize agent cho
+workflow của bạn.
+
+---
+
+### Đọc thêm
+
+- [Cursor Skills cho người mới](/blog/cursor-skills-beginner-guide)
+- [Cursor Sub-agents](/blog/cursor-sub-agents-guide)
+- [Cursor Rules](/blog/cursor-rules-guide)
+- [AI Hallucination — Vì sao AI bịa đặt](/blog/ai-hallucination-and-how-to-spot-it)
+- [Tokens & Pricing](/blog/ai-tokens-and-pricing-explained)
+- Cursor Learn course — [cursor.com/learn](https://cursor.com/learn) (series
+  chính thức của Cursor, tiếng Anh, tham khảo thêm để so sánh góc nhìn)

@@ -1,0 +1,542 @@
+---
+title: 'Cursor Rules — Enforce coding standard tự động cho AI agent'
+description: 'Rule là gì, khác Skill ra sao, 3 loại scope (alwaysApply / globs / manual), cấu trúc .mdc file, best practices viết rule ngắn-chất, và 6 rule mẫu sẵn dùng cho project TypeScript/frontend.'
+pubDate: 2026-04-30
+tags: [cursor, ai-agent, rules, coding-standards, workflow]
+draft: false
+---
+
+Bài cuối trong series 3 phần về Cursor AI Agent. Hai phần trước:
+
+- [Cursor Skills cho người mới](/blog/cursor-skills-beginner-guide)
+- [Cursor Sub-agents — Delegate task nặng](/blog/cursor-sub-agents-guide)
+
+**Rule** là anh em gần gũi nhất với Skill — cùng mục đích "dạy agent
+làm đúng", nhưng scope nhỏ hơn, lightweight hơn, và dùng rất khác.
+
+Nếu Skill là "cẩm nang cho workflow phức tạp", Rule là "vài lời nhắc kẹp
+ở bàn làm việc" — agent liếc qua mỗi khi đụng loại file tương ứng.
+
+---
+
+## 1. Rule là gì?
+
+**Rule** là file markdown (đuôi `.mdc`) đặt trong `.cursor/rules/` của
+project, chứa **hướng dẫn ngắn** mà agent sẽ đọc tự động theo điều kiện
+bạn đặt ra.
+
+```text
+                           ┌───────────────────────────┐
+  User mở file ABC.ts ────►│   Cursor Agent            │
+                           │                           │
+                           │  "File .ts à. Check rule  │
+                           │   nào có glob **/*.ts"    │
+                           └───────────┬───────────────┘
+                                       │ auto-attach
+                                       ▼
+                           ┌───────────────────────────┐
+                           │  .cursor/rules/           │
+                           │  ├─ coding-standards.mdc  │ ← always
+                           │  ├─ typescript.mdc        │ ← match
+                           │  ├─ react-patterns.mdc    │ (skip, .tsx only)
+                           │  └─ git-commits.mdc       │ (manual, skip)
+                           └───────────────────────────┘
+                                       │
+                                       ▼
+                           Agent "có thêm context":
+                           - Dùng import type cho type-only
+                           - Không dùng any
+                           - Path alias ~/ thay vì ../../../
+```
+
+Agent đọc rule → **thành một phần system prompt** → mỗi câu trả lời sau
+đó đều follow.
+
+---
+
+## 2. Rule vs Skill vs AGENTS.md — bảng so sánh
+
+Ba loại này hay bị nhầm. Tóm gọn:
+
+| Loại          | File                        | Khi load            | Dung lượng chuẩn | Dùng cho                                       |
+| ------------- | --------------------------- | ------------------- | ---------------- | ---------------------------------------------- |
+| **Rule**      | `.cursor/rules/*.mdc`       | Theo glob / always  | < 50 dòng        | Coding standard, convention, style guide       |
+| **Skill**     | `.cursor/skills/*/SKILL.md` | Khi agent tự detect | < 500 dòng       | Workflow nhiều bước, domain task               |
+| **AGENTS.md** | Project root                | Mọi session         | < 200 dòng       | High-level overview: project là gì, tech stack |
+
+Nói cách khác:
+
+- "Trong `.ts` file luôn dùng `import type`" → **Rule**.
+- "Quy trình 4 phase để implement Jira ticket" → **Skill**.
+- "Project này là blog Astro, deploy lên Cloudflare Pages, content viết
+  MDX" → **AGENTS.md**.
+
+---
+
+## 3. Anatomy của một Rule
+
+File `.mdc` = YAML frontmatter + Markdown body:
+
+```markdown
+---
+description: TypeScript conventions for this project
+globs: **/*.ts
+alwaysApply: false
+---
+
+# Rule title
+
+Your rule content here...
+```
+
+### Frontmatter fields
+
+| Field         | Type    | Mô tả                                                                  |
+| ------------- | ------- | ---------------------------------------------------------------------- |
+| `description` | string  | Tóm tắt 1 dòng — hiện trong rule picker, agent dùng để quyết định load |
+| `globs`       | string  | Glob pattern — rule tự attach khi file matching được mở/edit           |
+| `alwaysApply` | boolean | `true` → inject mỗi session, bất kể file nào đang mở                   |
+
+### Body
+
+Markdown thường — chỉ có điều **ngắn, actionable, có ví dụ BAD/GOOD**.
+
+---
+
+## 4. Ba loại scope — dùng đúng sẽ tiết kiệm context rất nhiều
+
+Mỗi Rule được kích hoạt bằng **1 trong 3 cách**:
+
+### 4.1. Always Apply
+
+```yaml
+---
+description: Core coding standards for the project
+alwaysApply: true
+---
+```
+
+→ Mỗi conversation đều load rule này.
+
+**Dùng cho:** nguyên tắc chung cho cả project, áp dụng bất kỳ file nào.
+
+**Đừng lạm dụng:** rule `alwaysApply: true` đốt context vĩnh viễn. Có 10
+rule `alwaysApply` là bạn mất sẵn vài nghìn token cho mỗi câu hỏi — kể cả
+khi chỉ hỏi "giờ mấy giờ".
+
+### 4.2. Auto-attach theo glob
+
+```yaml
+---
+description: TypeScript conventions
+globs: **/*.ts
+alwaysApply: false
+---
+```
+
+→ Chỉ load khi bạn đang làm việc với file `.ts`.
+
+**Dùng cho:** convention theo ngôn ngữ / framework / folder.
+
+Ví dụ glob phổ biến:
+
+```yaml
+globs: **/*.ts              # Mọi file .ts
+globs: **/*.tsx             # Chỉ React component
+globs: **/*.{ts,tsx}        # Cả hai
+globs: src/api/**/*.ts      # Chỉ trong folder api
+globs: **/*.test.ts         # Chỉ file test
+globs: src/content/**/*.mdx # Chỉ MDX content
+```
+
+### 4.3. Manual
+
+```yaml
+---
+description: Git commit message conventions
+---
+```
+
+Không `alwaysApply`, không `globs` → chỉ load khi user **gõ
+`@rule-name`** trong chat.
+
+**Dùng cho:** rule ít khi cần, nhưng khi cần thì quan trọng. Ví dụ: rule
+về release process, về cách viết commit message — chỉ kích hoạt trước khi
+commit.
+
+---
+
+## 5. Best practices — viết rule chất lượng
+
+### 5.1. Dưới 50 dòng mỗi rule
+
+Agent sẽ **đọc lướt**, không đọc kỹ. Rule càng dài càng dễ bị bỏ sót nội
+dung giữa.
+
+Nếu nội dung > 50 dòng → chia thành 2-3 rule nhỏ theo concern.
+
+### 5.2. 1 concern = 1 file
+
+```text
+❌ BAD: everything.mdc chứa cả TypeScript + React + Git + Test
+
+✅ GOOD:
+.cursor/rules/
+├── typescript.mdc      # chỉ TS
+├── react-patterns.mdc  # chỉ React
+├── testing.mdc         # chỉ test
+└── git-commits.mdc     # chỉ commit
+```
+
+Lợi ích: Cursor chỉ attach đúng phần cần theo glob → tiết kiệm context.
+
+### 5.3. BAD/GOOD example, không nói suông
+
+LLM học từ pattern. Rule trừu tượng "nên viết code sạch" không giúp ích
+gì. Rule có ví dụ cụ thể mới có tác dụng:
+
+```markdown
+\`\`\`ts
+// ❌ BAD — swallow error silently
+try { await fetchData(); } catch {}
+
+// ✅ GOOD — log + rethrow với cause
+try {
+await fetchData();
+} catch (error) {
+throw new Error('Failed to fetch', { cause: error });
+}
+\`\`\`
+```
+
+### 5.4. Imperative mood
+
+```text
+✅ "Dùng import type cho type-only import"
+❌ "Có lẽ nên cân nhắc dùng import type nếu có thể..."
+```
+
+Rule không phải RFC. Ra lệnh trực tiếp.
+
+### 5.5. Viết như docs nội bộ
+
+Không lan man bối cảnh, không giải thích dài "vì sao". Agent đã thông
+minh sẵn → chỉ cần biết **làm gì** và **không làm gì**.
+
+---
+
+## 6. Ví dụ 6 rule thực chiến cho project TypeScript/Frontend
+
+Dưới đây là bộ rule mẫu đủ tốt để drop thẳng vào project. Adjust theo
+convention của team bạn.
+
+### 6.1. `coding-standards.mdc` — always apply
+
+```markdown
+---
+description: Core coding standards
+alwaysApply: true
+---
+
+# Coding Standards
+
+## Principles
+
+- Clean & maintainable — code đọc như văn bản
+- No over-engineering — không abstraction nếu < 2 use case
+- Type-safe — TS strict mode, cấm `any` (dùng `unknown` nếu buộc)
+- Tách logic khỏi UI — helper ở `src/lib/`, không inline
+
+## Comments
+
+Chỉ comment **why**, không comment **what**.
+
+\`\`\`ts
+// ❌ BAD
+counter += 1; // increment counter
+
+// ✅ GOOD
+// Reset cache mỗi 5 phút — tránh stale data từ CDN edge
+if (Date.now() - cachedAt > 5 \* 60_000) cache.clear();
+\`\`\`
+
+## Naming
+
+- Component: `PascalCase.tsx`
+- Util file: `kebab-case.ts`
+- Variable/function: `camelCase`
+- Type/Interface: `PascalCase`, không prefix `I`
+```
+
+### 6.2. `typescript.mdc` — auto-attach `.ts`
+
+```markdown
+---
+description: TypeScript conventions (strict mode)
+globs: **/*.ts
+alwaysApply: false
+---
+
+# TypeScript
+
+## Types
+
+- `type` cho union/primitive, `interface` cho object shape extend được
+- Không `any` — dùng `unknown` rồi narrow
+
+## Imports
+
+- Path alias `~/` thay vì `../../../`
+- `import type` cho type-only để tree-shake
+
+\`\`\`ts
+import type { User } from '~/types';
+import { getUser } from '~/lib/api';
+\`\`\`
+
+## Errors
+
+\`\`\`ts
+// ❌ BAD
+try { await fetch(); } catch {}
+
+// ✅ GOOD
+try {
+await fetch();
+} catch (error) {
+throw new Error('Fetch failed', { cause: error });
+}
+\`\`\`
+```
+
+### 6.3. `react-patterns.mdc` — auto-attach `.tsx`
+
+```markdown
+---
+description: React component patterns
+globs: **/*.tsx
+alwaysApply: false
+---
+
+# React
+
+- Functional components, không class
+- Custom hook cho logic tái sử dụng
+- Memoization có chủ đích (`useMemo`/`useCallback`) — đừng wrap everything
+- Colocate style với component (CSS module / Tailwind class)
+- Key trong list phải stable, KHÔNG dùng index nếu item có thể reorder
+
+\`\`\`tsx
+// ❌ BAD — inline handler + object → re-render con mỗi lần
+<Child onClick={() => doSomething(id)} config={{ a: 1 }} />
+
+// ✅ GOOD
+const handleClick = useCallback(() => doSomething(id), [id]);
+const config = useMemo(() => ({ a: 1 }), []);
+<Child onClick={handleClick} config={config} />
+\`\`\`
+```
+
+### 6.4. `tailwind-styling.mdc` — auto-attach UI files
+
+```markdown
+---
+description: Tailwind + design tokens
+globs: **/*.{tsx,astro,css}
+alwaysApply: false
+---
+
+# Styling
+
+## Design tokens là source of truth
+
+Tokens ở `src/styles/global.css`. Không hard-code màu trong component.
+
+\`\`\`tsx
+// ❌ BAD
+
+<div className="bg-[#0a0a0a] text-[#e5e5e5]">
+
+// ✅ GOOD
+
+<div className="bg-bg text-fg">
+\`\`\`
+
+## Responsive
+
+- Mobile-first: base class trước, override bằng `sm: md: lg:`
+- Không custom breakpoint trừ khi thực sự cần
+
+## Khi class quá dài
+
+5+ dòng class → tách component nhỏ hơn. Đừng gom vào file CSS riêng.
+```
+
+### 6.5. `testing.mdc` — auto-attach test files
+
+```markdown
+---
+description: Testing patterns
+globs: **/*.{test,spec}.{ts,tsx}
+alwaysApply: false
+---
+
+# Testing
+
+- 1 `describe` mỗi module, 1 `it` mỗi behavior
+- Test behavior, không test implementation
+- Mock ở boundary (HTTP, DB) — không mock logic nội bộ
+- Không share state giữa các test (reset trong `beforeEach`)
+
+\`\`\`ts
+// ❌ BAD — test implementation detail
+it('calls setState once', () => { ... });
+
+// ✅ GOOD — test behavior
+it('shows error message when login fails', async () => { ... });
+\`\`\`
+```
+
+### 6.6. `git-commits.mdc` — manual (reference bằng `@git-commits`)
+
+```markdown
+---
+description: Conventional commit message format
+---
+
+# Git Commits
+
+## Format
+
+\`\`\`
+<type>(<scope>): <subject>
+
+<body — why, không what>
+\`\`\`
+
+## Types
+
+| Type       | Khi nào                          |
+| ---------- | -------------------------------- |
+| `feat`     | Feature mới                      |
+| `fix`      | Bug fix                          |
+| `refactor` | Đổi cấu trúc, không đổi behavior |
+| `docs`     | README / comment / MDX           |
+| `chore`    | Deps, config, CI                 |
+| `perf`     | Performance                      |
+
+## Rules
+
+- Subject lowercase, imperative ("add", không "added"), ≤ 72 ký tự
+- Không commit message kiểu `update`, `fix bug`, `wip`
+- Body giải thích **why** + trade-off
+```
+
+---
+
+## 7. Test rule có hoạt động không
+
+Sau khi tạo rule, verify bằng cách:
+
+1. **Mở file matching glob** — ví dụ bấm vào `foo.ts`
+2. **Hỏi Cursor câu liên quan** — "Refactor hàm này"
+3. **Check response** — có theo convention trong rule không (import type,
+   `~/` alias, ...)
+
+Trong Cursor Settings có mục **Rules** cho phép xem rule nào đang active
+cho session hiện tại. Dùng để debug khi rule không trigger như mong đợi.
+
+---
+
+## 8. Anti-patterns — khi rule phản tác dụng
+
+### ❌ 1. Dùng Rule cho workflow phức tạp
+
+```text
+.cursor/rules/implement-feature.mdc (300 dòng, 4 phase)
+```
+
+Workflow nhiều bước → viết **Skill**, không phải Rule. Rule dài bị agent
+đọc lướt, Skill được load có chủ đích.
+
+### ❌ 2. `alwaysApply: true` quá nhiều
+
+Có 8 rule `alwaysApply` = context luôn đầy sẵn 30% → mỗi chat ngắn hơn,
+agent quên task gốc nhanh hơn.
+
+**Giới hạn tự đặt**: ≤ 2 rule `alwaysApply`. Những cái khác đổi sang
+glob-based.
+
+### ❌ 3. Rule mâu thuẫn nhau
+
+```text
+rule A: "Dùng tab"
+rule B: "Dùng 2 space"
+```
+
+Cả 2 đều load → agent confuse → output random. Audit rule định kỳ.
+
+### ❌ 4. Thông tin thay đổi thường xuyên
+
+```text
+❌ BAD rule:
+"Deploy URL hiện tại là https://staging-v3.example.com"
+```
+
+URL đổi là rule sai. Thứ hay đổi → đặt ở file config, rule chỉ reference.
+
+### ❌ 5. Rule viết như essay
+
+```text
+❌ BAD
+"Trong cuộc đời coding của chúng ta, type-safety là cực kỳ quan trọng.
+ Nó giúp catch bug ở compile time, tăng developer confidence..."
+
+✅ GOOD
+"- Không dùng `any`. Dùng `unknown` nếu chưa biết type.
+ - Bật strict mode trong tsconfig.json."
+```
+
+---
+
+## 9. Rule lifecycle — maintain thế nào
+
+Rule không phải "viết 1 lần rồi quên". Cứ mỗi quý:
+
+1. **Audit những rule `alwaysApply`** — còn cần thiết không? Có thể đổi
+   sang glob-based không?
+2. **Check rule bị ignore** — hỏi 1 câu mà agent không follow rule → rule
+   đó có vấn đề (viết không rõ, mâu thuẫn với rule khác, hoặc
+   description kém).
+3. **Đồng bộ với codebase** — convention đổi → rule phải đổi theo. Rule
+   lệch với code = noise.
+4. **Thêm rule từ pattern lặp** — thấy mình correct agent cùng 1 thứ 3+
+   lần → lên rule luôn.
+
+---
+
+## 10. Tổng kết series
+
+Xuyên suốt 3 bài, bạn đã có một bộ công cụ đầy đủ để "huấn luyện" Cursor
+AI agent:
+
+| Khi nào dùng                        | Công cụ       |
+| ----------------------------------- | ------------- |
+| Coding standard, style, naming      | **Rule**      |
+| Workflow nhiều bước, domain task    | **Skill**     |
+| Task nặng cần bảo vệ context window | **Sub-agent** |
+
+**Quy trình khuyến nghị** khi setup một project mới:
+
+1. Viết `AGENTS.md` ở root — overview project (stack, kiến trúc, lệnh
+   chính).
+2. Tạo 3-5 `Rule` essential — coding standards cho stack của bạn.
+3. Identify 1-2 task lặp đi lặp lại → viết thành `Skill`.
+4. Khi task phức tạp tới mức đọc nhiều file/docs → delegate cho
+   **Sub-agent**.
+
+Cursor không phải công cụ "plug and play hay ho". Nó là **platform** để
+bạn build workflow AI-native. Đầu tư chút thời gian ban đầu → sau này
+mỗi task ngồi xuống đều nhanh hơn, ít bug hơn, và đồng bộ trong cả team.
+
+Happy building!

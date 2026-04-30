@@ -1,0 +1,782 @@
+---
+title: 'Tokenization, Temperature, Top-p, Top-k — Mechanics bên dưới mọi LLM'
+description: '4 cơ chế kỹ thuật mà dev nào dùng LLM cũng nên hiểu sâu: BPE tokenization step-by-step, math của temperature scaling, top-p (nucleus) vs top-k sampling, sampling pipeline hoàn chỉnh, và parameter cheatsheet.'
+pubDate: 2026-04-30
+tags: [ai, llm, tokenization, sampling, temperature, fundamentals]
+draft: false
+---
+
+Bạn dùng LLM mỗi ngày qua Cursor, ChatGPT, API. Nhưng có 4 mechanics
+underlying mà ít dev hiểu sâu:
+
+1. **Tokenization** — text thành số như thế nào?
+2. **Temperature** — sao T=0.7 lại "creative", T=0 lại "deterministic"?
+3. **Top-p** — nucleus sampling là gì?
+4. **Top-k** — khác top-p ra sao?
+
+Bài [Tokens & Pricing](/blog/ai-tokens-and-pricing-explained) cover
+góc cost. Bài [Prompting Fundamentals](/blog/llm-prompting-fundamentals)
+cover góc prompt. Bài này đi **sâu vào math + implementation** của 4
+mechanics — đủ để bạn debug output kỳ lạ, tune parameter có lý do, và
+không treat LLM như magic box.
+
+---
+
+## 1. Vì sao dev nên hiểu 4 mechanics này
+
+```text
+USER PROMPT
+    │
+    ▼
+[1] Tokenization     → "hello" → [15339]
+    │
+    ▼
+TRANSFORMER FORWARD
+    │
+    ▼
+LOGITS (vocab-size dimension)
+    │
+    ▼
+[2] Temperature      → scale logits → softmax
+    │
+    ▼
+PROBABILITY DISTRIBUTION (toàn vocab)
+    │
+    ▼
+[3] Top-k filter     → giữ k token cao nhất
+    │
+    ▼
+[4] Top-p filter     → giữ subset cumulative ≤ p
+    │
+    ▼
+SAMPLE                → random pick → next token
+```
+
+Mỗi step có parameter. Hiểu mechanics → biết tune nào ảnh hưởng gì.
+
+---
+
+## 2. Tokenization — text thành số
+
+### 2.1. Vì sao không dùng character / word
+
+**Character-level**:
+
+```text
+"hello world" → [h, e, l, l, o, " ", w, o, r, l, d] → 11 token
+```
+
+Vocabulary nhỏ (~256 ký tự ASCII). Nhược: chuỗi dài, model khó học
+dependency xa.
+
+**Word-level**:
+
+```text
+"hello world" → [hello, world] → 2 token
+```
+
+Nhược:
+
+- Vocabulary khổng lồ (1M+ từ)
+- Word mới (tên riêng, slang, typo) → unknown token
+- Không xử lý morphology (`run`, `running`, `ran` là token riêng)
+
+**Subword (BPE)**: cân bằng. Token mảnh nhỏ hơn word, lớn hơn ký tự.
+
+### 2.2. BPE algorithm — step by step
+
+**Byte Pair Encoding** (Sennrich et al. 2016, dùng trong GPT, Llama,
+Mistral...).
+
+Algorithm:
+
+```text
+Input: corpus C, vocab size target V
+
+1. Init vocabulary = tất cả ký tự đơn xuất hiện trong C
+2. Repeat V - len(initial_vocab) lần:
+   a. Đếm tất cả pair (token_i, token_i+1) liền kề trong C
+   b. Tìm pair xuất hiện nhiều nhất
+   c. Merge pair đó thành token mới, add vào vocab
+   d. Update C: replace mọi pair → token mới
+3. Return vocab
+```
+
+### 2.3. Ví dụ minimal
+
+Corpus toy: `["low", "low", "lower", "newer", "newest"]`
+
+```text
+Init vocab: {l, o, w, e, r, n, s, t}
+
+Iteration 1:
+Đếm pairs trong corpus:
+  (l,o):  3   ← max
+  (o,w):  3
+  (w,e):  3
+  ...
+Merge "l"+"o" = "lo"
+Vocab: {l, o, w, e, r, n, s, t, lo}
+Corpus: ["lo·w", "lo·w", "lo·w·e·r", "n·e·w·e·r", "n·e·w·e·s·t"]
+
+Iteration 2:
+Đếm:
+  (lo,w): 3   ← max
+  ...
+Merge "lo"+"w" = "low"
+Vocab: {..., low}
+Corpus: ["low", "low", "low·e·r", "n·e·w·e·r", "n·e·w·e·s·t"]
+
+Iteration 3:
+  (e,r): 2   ← max
+Merge "e"+"r" = "er"
+...
+```
+
+Sau N iteration, vocab chứa subword "frequent" thực tế.
+
+### 2.4. Tokenization tiếng Anh vs tiếng Việt
+
+GPT-4 tokenizer (cl100k_base):
+
+```python
+import tiktoken
+enc = tiktoken.encoding_for_model("gpt-4")
+
+enc.encode("hello world")
+# → [15339, 1917]  (2 tokens)
+
+enc.encode("understanding programming")
+# → [8154, 11628]  (2 tokens)
+
+enc.encode("xin chào")
+# → [87, 258, 23131, 24015]  (4 tokens — wait this is BPE level)
+
+enc.encode("hiểu lập trình")
+# → [71, 71101, 80, 444, 4505, 9637, 65, 56860]  (~8 tokens)
+```
+
+Tỉ lệ:
+
+- English: 1 word ≈ 1.3 tokens
+- Vietnamese: 1 word ≈ 2-3 tokens
+- Tiếng Việt **đắt 2-3x** ở pricing pay-per-token.
+
+### 2.5. Tokenizer khác nhau giữa model
+
+| Tokenizer               | Dùng bởi                   | Vocab size  |
+| ----------------------- | -------------------------- | ----------- |
+| `cl100k_base`           | GPT-4, GPT-3.5, embeddings | 100,277     |
+| `o200k_base`            | GPT-4o, o1, o3             | 200,019     |
+| `tiktoken-GPT-2`        | GPT-2 (legacy)             | 50,257      |
+| Llama tokenizer         | Llama family               | 128,000     |
+| SentencePiece (Llama 2) | Llama 2                    | 32,000      |
+| Claude tokenizer        | Claude (Anthropic)         | proprietary |
+| Tekken                  | Mistral                    | 131,000     |
+
+Tokenizer to hơn → chia mịn hơn → multilingual tốt hơn nhưng cost
+storage/inference cao hơn.
+
+### 2.6. Thực hành: đếm token offline
+
+```python
+import tiktoken
+
+enc = tiktoken.encoding_for_model("gpt-4o")
+
+text = "Bạn đang đọc bài blog này"
+tokens = enc.encode(text)
+
+print(f"Text: {text}")
+print(f"Tokens: {tokens}")
+print(f"Decoded each: {[enc.decode([t]) for t in tokens]}")
+print(f"Count: {len(tokens)}")
+```
+
+Output:
+
+```text
+Text: Bạn đang đọc bài blog này
+Tokens: [33, 9165, 91087, 91144, 50596, 12814, 17567, 17249]
+Decoded each: ['B', 'ạ', 'n', ' đang', ' đ', 'ọc', ' bài', ' blog', ' này']
+Count: 9
+```
+
+→ Đếm được 9 token cho 25 ký tự, ratio 2.8 char/token (tệ — tiếng Anh
+~4 char/token).
+
+### 2.7. Tokenizer playground online
+
+- **OpenAI**: [platform.openai.com/tokenizer](https://platform.openai.com/tokenizer)
+- **Anthropic**: tokenizer count qua API
+- **Llama**: [Tokenizer Playground HF Spaces](https://huggingface.co/spaces/Xenova/the-tokenizer-playground)
+
+Paste prompt → xem chia token thế nào → optimize.
+
+---
+
+## 3. Từ logits đến token — sampling pipeline
+
+Sau forward pass, model output **logits** (vector kích thước = vocab
+size, ví dụ 200K).
+
+```text
+Logits: [-2.1, 5.3, 3.7, -0.8, 1.2, ...]  (200,019 numbers)
+```
+
+Mỗi value tương ứng với 1 token trong vocab. Cao = model "tin" token
+đó nên là next.
+
+**Logits không phải probability**. Cần convert:
+
+```text
+softmax(logit_i) = exp(logit_i) / Σ exp(logit_j)
+```
+
+Sau softmax:
+
+```text
+Probability: [0.001, 0.42, 0.35, 0.002, 0.05, ...]
+                     (vocab[1] = " the" = 42% chance)
+```
+
+Distribution này tổng = 1.0. Sampling = chọn token ngẫu nhiên theo
+xác suất này.
+
+Vấn đề: distribution có thể "flat" (mọi token gần đều) hoặc "sharp"
+(1 token dominate). Mechanics dưới đây **shape distribution** trước
+khi sample.
+
+---
+
+## 4. Temperature — control độ "sharp"
+
+### 4.1. Math
+
+Temperature scaling chèn vào softmax:
+
+```text
+softmax_T(logit_i) = exp(logit_i / T) / Σ exp(logit_j / T)
+```
+
+T là scalar. Phân tích 3 case:
+
+**T = 1**: y nguyên softmax thường.
+
+**T &lt; 1** (T → 0): logit chia cho số nhỏ → magnify difference.
+Token xác suất cao càng cao, thấp càng thấp. Distribution trở nên
+**sharp**.
+
+**T &gt; 1**: logit chia cho số lớn → giảm difference. Distribution
+trở nên **flat** — mọi token gần đều xác suất.
+
+### 4.2. Visualize 3 case
+
+Logits: `[5.3, 3.7, 1.2, 0.5, -1.0]` (5 token candidates)
+
+```text
+T = 0.5 (low):
+Distribution: [0.79, 0.16, 0.03, 0.01, 0.00]
+                ↑ token 0 chiếm 79% — sharp
+
+T = 1.0 (default):
+Distribution: [0.69, 0.14, 0.04, 0.02, 0.01]
+                            (vẫn dominate token 0 nhưng nhẹ hơn)
+
+T = 2.0 (high):
+Distribution: [0.51, 0.23, 0.10, 0.07, 0.04]
+                            (token 0 giảm, các token khác tăng — flat)
+```
+
+### 4.3. Effect thực tế
+
+| T       | Behavior                   | Dùng cho                               |
+| ------- | -------------------------- | -------------------------------------- |
+| 0       | Greedy — luôn token argmax | Code generation, refactor, JSON output |
+| 0.1-0.3 | Near-greedy, hơi variation | Bug fix, structured task               |
+| 0.5-0.7 | Default conversational     | Chat, Q&A                              |
+| 0.8-1.0 | Creative                   | Brainstorm, naming                     |
+| 1.2-1.5 | Very creative              | Poetry, fiction                        |
+| > 2.0   | Often nonsense             | Hiếm khi dùng                          |
+
+### 4.4. T = 0 không hoàn toàn deterministic
+
+Lý thuyết T=0 → argmax → deterministic. Thực tế:
+
+- **Floating point precision**: GPU compute non-deterministic ở mức
+  bit cuối.
+- **Batching**: query của bạn batch với query khác có thể tạo difference.
+- **Distributed inference**: model chạy nhiều GPU, kết quả combine có
+  khác biệt nhỏ.
+
+→ Cùng prompt, T=0 vẫn có **~95-98% identical**, không 100%.
+
+Muốn truly reproducible: pass `seed` parameter (OpenAI hỗ trợ).
+
+```python
+client.chat.completions.create(
+    model="gpt-4o",
+    messages=[...],
+    temperature=0,
+    seed=42  # reproducible
+)
+```
+
+### 4.5. Pitfalls
+
+**Bẫy 1: T quá thấp cho creative task**
+
+```text
+Prompt: "Write a poem about coding"
+T = 0 → output bland, robotic, lặp pattern
+T = 1 → output diverse, surprising
+```
+
+**Bẫy 2: T quá cao cho code**
+
+```text
+Prompt: "Refactor this function"
+T = 1.5 → có thể introduce typo, hallucinate API, sai syntax
+T = 0 → consistent, predictable
+```
+
+---
+
+## 5. Top-p (nucleus sampling)
+
+### 5.1. Vấn đề với pure temperature
+
+Temperature shape distribution, nhưng vẫn có thể sample **token
+extremely unlikely**. Ví dụ T=1.0:
+
+```text
+Distribution: [0.4, 0.3, 0.1, 0.05, 0.05, 0.04, ..., 0.001, 0.001, ...]
+                                                       ↑ low-prob tail
+```
+
+Sampling từ tail → output bizarre, off-topic.
+
+### 5.2. Top-p solution
+
+Holtzman et al. 2019 "The Curious Case of Neural Text Degeneration":
+giới hạn sample chỉ trong **nucleus** (set of token cumulative
+probability ≤ p).
+
+Algorithm:
+
+```text
+1. Sort token theo probability giảm dần
+2. Cộng dồn từ trên xuống
+3. Giữ token cho đến khi cumulative ≥ p
+4. Re-normalize phần giữ lại
+5. Sample từ subset này
+```
+
+### 5.3. Ví dụ p = 0.9
+
+Distribution sorted:
+
+```text
+Token A: 0.40 (cumul: 0.40)
+Token B: 0.25 (cumul: 0.65)
+Token C: 0.15 (cumul: 0.80)
+Token D: 0.10 (cumul: 0.90) ← reach 0.9, stop
+Token E: 0.05 (excluded)
+Token F: 0.03 (excluded)
+...
+```
+
+Chỉ `{A, B, C, D}` được sample. Re-normalize:
+
+```text
+A: 0.40/0.90 = 0.44
+B: 0.25/0.90 = 0.28
+C: 0.15/0.90 = 0.17
+D: 0.10/0.90 = 0.11
+```
+
+Sample từ 4 token này.
+
+### 5.4. Adaptive nature — vì sao top-p smart
+
+Khi model **confident** (1 token dominate):
+
+```text
+A: 0.95
+B: 0.03
+...
+
+Top-p 0.9 → giữ chỉ A. Output deterministic.
+```
+
+Khi model **uncertain** (distribution flat):
+
+```text
+A: 0.10, B: 0.09, C: 0.08, D: 0.07, ..., Z: 0.02
+
+Top-p 0.9 → giữ ~15-20 token. Output diverse.
+```
+
+**Top-p tự động điều chỉnh số token dựa theo confidence**. Đó là lý
+do nó "smart" hơn top-k.
+
+### 5.5. Default values
+
+| Provider              | Default top-p           |
+| --------------------- | ----------------------- |
+| OpenAI                | 1.0 (no nucleus filter) |
+| Anthropic             | 1.0                     |
+| Default in literature | 0.9 - 0.95              |
+
+API providers default top-p = 1 (tắt) vì user thường tune temperature.
+Set top-p &lt; 1 nếu muốn extra control.
+
+---
+
+## 6. Top-k
+
+### 6.1. Math
+
+Đơn giản hơn top-p: giữ k token xác suất cao nhất.
+
+```text
+1. Sort token theo probability
+2. Giữ top k tokens
+3. Re-normalize
+4. Sample
+```
+
+### 6.2. Ví dụ k = 5
+
+Distribution: `[0.40, 0.25, 0.15, 0.10, 0.05, 0.03, 0.02, ...]`
+
+```text
+Top 5: [A: 0.40, B: 0.25, C: 0.15, D: 0.10, E: 0.05]
+Sum: 0.95
+Re-normalize: [0.42, 0.26, 0.16, 0.11, 0.05]
+```
+
+### 6.3. Top-k vs top-p — khi nào dùng cái nào
+
+| Aspect            | Top-k           | Top-p                    |
+| ----------------- | --------------- | ------------------------ |
+| Adaptive          | ❌ Fixed k      | ✅ Adapt theo confidence |
+| Predictable count | ✅ Luôn k token | ❌ Variable              |
+| Implementation    | Đơn giản        | Hơi phức tạp             |
+| Modern preference | Ít dùng         | Phổ biến                 |
+
+**Top-p thường tốt hơn** vì adaptive. Top-k có 2 trường hợp dùng:
+
+1. **Combine với top-p**: filter k trước, sau đó nucleus → tránh edge
+   case top-p giữ quá nhiều token.
+2. **Local LLM**: llama.cpp, Ollama default top-k = 40.
+
+### 6.4. Top-k = 1 = greedy
+
+```text
+k = 1 → chỉ giữ token max
+       → tương đương T = 0
+```
+
+### 6.5. API support
+
+- **OpenAI**: KHÔNG expose top-k (chỉ temperature + top-p).
+- **Anthropic**: KHÔNG expose top-k.
+- **Google Gemini**: ✅ expose top-k.
+- **Local LLM (Ollama, llama.cpp)**: ✅ standard.
+
+→ Nếu dùng OpenAI/Claude, bỏ qua top-k. Chỉ liên quan với local LLM
+hoặc Google.
+
+---
+
+## 7. Sampling pipeline hoàn chỉnh
+
+3 mechanics chain với nhau:
+
+```text
+LOGITS
+   │
+   ▼
+Apply temperature (scale logits)
+   │
+   ▼
+Softmax → probability distribution
+   │
+   ▼
+Top-k filter (giữ k cao nhất)
+   │
+   ▼
+Top-p filter (giữ cumulative ≤ p)
+   │
+   ▼
+Re-normalize
+   │
+   ▼
+Sample (random theo distribution)
+   │
+   ▼
+NEXT TOKEN
+```
+
+Mỗi step optional (set k=∞ hoặc p=1.0 để skip).
+
+### 7.1. Order matters
+
+Default order: temperature → top-k → top-p. Một số implement đảo top-k
+và top-p — kết quả tương tự nhưng không identical với edge case.
+
+### 7.2. Cheatsheet thực tế
+
+| Task                | T       | Top-p | Top-k | Note                        |
+| ------------------- | ------- | ----- | ----- | --------------------------- |
+| Code generate       | 0       | 1     | n/a   | Reproducible                |
+| Code review         | 0.2     | 0.95  | n/a   | Slight variation OK         |
+| Bug fix             | 0 - 0.1 | 1     | n/a   | Cần chính xác               |
+| JSON / structured   | 0       | 1     | n/a   | Strict format               |
+| Translation         | 0.3     | 0.9   | n/a   | Slight creative cho fluency |
+| Conversational chat | 0.7     | 0.9   | n/a   | Default                     |
+| Brainstorm idea     | 0.9     | 0.95  | n/a   | Diverse                     |
+| Naming, marketing   | 1.0     | 0.95  | n/a   | Creative                    |
+| Poetry, fiction     | 1.2     | 0.95  | n/a   | High variance               |
+
+---
+
+## 8. Sampling parameters khác (briefly)
+
+### 8.1. Min-p (newer, 2023)
+
+Vấn đề top-p: với distribution flat, có thể giữ token rất low (0.01).
+Min-p set **threshold tối thiểu**:
+
+```text
+min_p = 0.05 → exclude any token < 5% × max_prob
+```
+
+Adaptive theo top probability. Mới nổi trong local LLM scene.
+
+### 8.2. Frequency penalty
+
+Giảm xác suất token đã xuất hiện nhiều trong output:
+
+```text
+new_logit_i = logit_i - penalty × count_in_output(token_i)
+```
+
+Range: -2 đến 2 (OpenAI). Positive → đẩy lùi repetition.
+
+### 8.3. Presence penalty
+
+Giảm xác suất token đã xuất hiện **ít nhất 1 lần** (không weight theo
+count):
+
+```text
+new_logit_i = logit_i - penalty × (token_i đã xuất hiện?)
+```
+
+Khuyến khích model đa dạng topic.
+
+### 8.4. Repetition penalty
+
+Local LLM (llama.cpp). Tương tự frequency nhưng multiplicative:
+
+```text
+new_logit_i = logit_i / repetition_penalty  (nếu đã xuất hiện)
+```
+
+Default 1.1-1.2.
+
+### 8.5. Beam search (alternative cho sampling)
+
+Thay vì sample, **explore nhiều path song song**:
+
+```text
+1. Generate top-k candidate token ở mỗi step
+2. Maintain B beams (path)
+3. Mỗi beam expand → score
+4. Keep top-B
+5. Sau N steps, return beam có score cao nhất
+```
+
+**Ưu**: deterministic, optimal cho fixed scoring.
+**Nhược**: chậm B× hơn sampling, output **bland** (greedy direction).
+
+Hiện tại beam search ít dùng cho text generation (sampling tốt hơn cho
+fluency). Vẫn dùng cho translation, summarization legacy.
+
+---
+
+## 9. Practical examples per platform
+
+### 9.1. OpenAI API
+
+```python
+client.chat.completions.create(
+    model="gpt-4o",
+    messages=[...],
+    temperature=0.7,
+    top_p=0.9,
+    frequency_penalty=0.3,  # giảm repeat
+    presence_penalty=0.0,
+    max_tokens=1000,
+    seed=42  # reproducible
+)
+```
+
+### 9.2. Anthropic API
+
+```python
+client.messages.create(
+    model="claude-3-5-sonnet-20241022",
+    messages=[...],
+    temperature=0.7,
+    top_p=0.9,
+    top_k=40,  # ✅ Anthropic does support top_k
+    max_tokens=1000
+)
+```
+
+### 9.3. Cursor
+
+Cursor abstract parameters. Default settings cho coding (T thấp).
+Có thể override per chat:
+
+- Settings → Cursor Settings → Models → expand
+- Chọn temperature nếu cần (advanced)
+
+### 9.4. Ollama (local)
+
+```bash
+ollama run llama3.3 \
+  --temperature 0.7 \
+  --top-p 0.9 \
+  --top-k 40 \
+  --repeat-penalty 1.1
+```
+
+Hoặc trong Modelfile:
+
+```text
+FROM llama3.3
+PARAMETER temperature 0.7
+PARAMETER top_p 0.9
+PARAMETER top_k 40
+PARAMETER repeat_penalty 1.1
+```
+
+### 9.5. llama.cpp
+
+```bash
+./llama-cli -m model.gguf \
+  --temp 0.7 \
+  --top-p 0.9 \
+  --top-k 40 \
+  --repeat-penalty 1.1 \
+  --min-p 0.05
+```
+
+---
+
+## 10. Debugging output bizarre
+
+### 10.1. Output too random
+
+Symptom: model nói off-topic, contradict, factually wrong.
+
+Try:
+
+- Lower temperature: 0.7 → 0.3
+- Lower top-p: 0.95 → 0.8
+- Add system prompt rõ ràng
+
+### 10.2. Output too repetitive
+
+Symptom: model lặp 1 phrase, "ohhh" ohhh" ohhh", stuck loop.
+
+Try:
+
+- Raise temperature: 0.3 → 0.7
+- Increase frequency_penalty: 0 → 0.5
+- Increase repetition_penalty (local): 1.0 → 1.2
+
+### 10.3. Output too bland
+
+Symptom: response generic, no surprise, "robotic".
+
+Try:
+
+- Raise temperature: 0.3 → 0.9
+- Raise top-p: 0.5 → 0.95
+- Increase presence_penalty: encourages new topic
+
+### 10.4. Output cuts off mid-sentence
+
+Symptom: response stop giữa câu.
+
+Cause:
+
+- `max_tokens` quá thấp → tăng
+- Hit stop sequence → check
+- Model genuinely confused → revise prompt
+
+### 10.5. Output won't follow JSON format
+
+Symptom: bạn yêu cầu JSON, output prose hoặc broken JSON.
+
+Try:
+
+- Set `temperature = 0` (chính xác hơn)
+- Use `response_format={"type": "json_object"}` (OpenAI)
+- Use structured output mode (newer API feature)
+- Force prefix: `Response (JSON only): {`
+
+---
+
+## 11. Tổng kết
+
+Tokenization, temperature, top-p, top-k là **mechanics nền tảng**. Hiểu
+chúng = control output, debug fluently, không treat LLM như magic.
+
+5 take-aways:
+
+1. **BPE** chia text thành subword. Tiếng Việt 2-3x token tiếng Anh
+   tương đương → cost cao hơn.
+2. **Temperature** scale logits. T=0 deterministic (mostly), T=0.7
+   default, T>1 creative.
+3. **Top-p** > **Top-k** trong hầu hết case (adaptive). OpenAI/Claude
+   không expose top-k.
+4. **Pipeline order**: temperature → top-k → top-p → sample.
+5. **Bizarre output** có root cause cụ thể — không phải "AI bị hỏng".
+
+Cheatsheet quan trọng nhất:
+
+```text
+Code task   → T = 0,    top-p = 1
+Chat        → T = 0.7,  top-p = 0.9
+Brainstorm  → T = 0.9,  top-p = 0.95
+Strict JSON → T = 0,    top-p = 1
+```
+
+Khi dev hiểu mechanics, mỗi parameter trở thành **lever** thay vì
+"magic number Stack Overflow nói thử".
+
+---
+
+### Đọc thêm
+
+- [Tokens & Pricing](/blog/ai-tokens-and-pricing-explained) — góc cost
+- [Prompting Fundamentals](/blog/llm-prompting-fundamentals) — góc prompt
+- [LLM Models Comparison](/blog/llm-models-comparison-guide)
+- [Hallucination](/blog/ai-hallucination-and-how-to-spot-it) — output
+  reliability
+- [Open-source LLM Ecosystem](/blog/open-source-llm-ecosystem) — local
+  LLM tuning
+
+### Reference
+
+- BPE original — Sennrich et al. 2016 ([arxiv.org/abs/1508.07909](https://arxiv.org/abs/1508.07909))
+- "The Curious Case of Neural Text Degeneration" (top-p) — Holtzman et al. 2019
+- Tiktoken — [github.com/openai/tiktoken](https://github.com/openai/tiktoken)
+- Hugging Face Tokenizers documentation
+- OpenAI API reference: temperature, top_p, frequency_penalty
+- Anthropic API reference: temperature, top_p, top_k

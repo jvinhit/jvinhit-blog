@@ -24,9 +24,7 @@ const sorted = [...all].sort((a, b) => {
 
 const total = sorted.length;
 const shipped = sorted.filter((p) => p.data.status === 'shipped').length;
-const inProgress = sorted.filter(
-  (p) => p.data.status === 'in-progress'
-).length;
+const inProgress = sorted.filter((p) => p.data.status === 'in-progress').length;
 ---
 
 <BaseLayout
@@ -89,12 +87,7 @@ const inProgress = sorted.filter(
       ) : (
         <ul class="mt-8 grid gap-4 sm:grid-cols-2 sm:gap-5">
           {sorted.map((project) => (
-            <li
-              class:list={[
-                project.data.featured && 'sm:col-span-2',
-                'flex',
-              ]}
-            >
+            <li class:list={[project.data.featured && 'sm:col-span-2', 'flex']}>
               <ProjectCard project={project} />
             </li>
           ))}

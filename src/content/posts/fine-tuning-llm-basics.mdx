@@ -1,0 +1,677 @@
+---
+title: 'Fine-tuning LLM — Khi nào cần, khi nào không, và cách thực sự làm'
+description: 'Fine-tuning vs prompt vs RAG — quyết định framework. 4 loại fine-tune (full, LoRA, QLoRA, instruction tuning), data preparation, cost analysis, và 6 cạm bẫy phổ biến (overfitting, catastrophic forgetting).'
+pubDate: 2026-04-30
+tags: [ai, llm, fine-tuning, lora, training, machine-learning]
+draft: false
+---
+
+"Fine-tune" là từ dev hay nghe nhưng ít người hiểu rõ. Bài này không
+phải tutorial click-by-click. Là **decision framework + concept** để
+bạn:
+
+1. Biết khi nào fine-tune **không phải** giải pháp đúng (90% case).
+2. Biết khi nào nó **bắt buộc** (10% case còn lại).
+3. Biết types fine-tune và trade-off.
+4. Biết cost thực tế trước khi đốt 1000 USD và thất vọng.
+
+Sau đó, nếu vẫn cần fine-tune, bạn approach đúng cách.
+
+---
+
+## 1. Fine-tuning là gì — định nghĩa kỹ thuật
+
+**Fine-tuning** = lấy 1 model đã pre-train (Llama, Mistral, GPT-4o-
+mini), train thêm trên data của bạn để adapt cho domain/task riêng.
+
+```text
+PRETRAINED MODEL (Llama 3.3 70B)
+  │ → đã học từ trillion tokens internet
+  │ → biết English, code, common knowledge
+  │
+  ▼
+FINE-TUNE với data riêng (10K example)
+  │ → adjust weights nhỏ
+  │ → giữ general knowledge, thêm domain knowledge
+  │
+  ▼
+SPECIALIZED MODEL
+  → Tốt hơn ở task riêng
+  → Vẫn dùng được task chung
+```
+
+Khác với:
+
+- **Pre-training**: train from scratch trên trillion token. Cost
+  $10M-$100M+. Chỉ provider lớn làm.
+- **Prompt engineering**: thay đổi prompt, không động vào weights.
+- **RAG**: thêm context vào prompt, không động vào weights.
+
+---
+
+## 2. 90% trường hợp: Đừng fine-tune
+
+Trước khi fine-tune, **luôn** thử 4 cách rẻ hơn trước:
+
+### 2.1. Better prompting
+
+Prompt tốt giải quyết 60-80% trường hợp tưởng cần fine-tune.
+
+```text
+❌ Prompt thường:
+   "Translate to formal Vietnamese: Hi"
+
+✅ Prompt detailed:
+   "You are a professional translator for business email.
+   Translation guideline:
+   - Use 'kính gửi' for formal greeting
+   - Maintain professional tone
+   - Avoid casual abbreviations
+
+   Examples:
+   - Input: 'Hi John' → Output: 'Kính gửi anh John'
+   - Input: 'Hey team' → Output: 'Kính gửi quý anh chị'
+
+   Now translate: 'Hi'"
+```
+
+Few-shot example trong prompt thường làm được điều bạn nghĩ cần
+fine-tune.
+
+### 2.2. RAG
+
+Cần model "biết" về data riêng → RAG, không phải fine-tune. RAG cập
+nhật được, fine-tune đông cứng knowledge.
+
+Đọc thêm: [RAG Guide](/blog/rag-retrieval-augmented-generation-guide).
+
+### 2.3. Better model
+
+Đôi khi model nhỏ không đủ → upgrade model lớn hơn rẻ + nhanh hơn
+fine-tune.
+
+Trước khi fine-tune Llama 8B, thử Claude Sonnet. Có thể out-of-the-box
+đã tốt hơn.
+
+### 2.4. Tool use / agent
+
+Task cần "compute đúng" → cho model dùng tool (calculator, code
+interpreter) thay vì dạy model tự "biết toán".
+
+### 2.5. Heuristic: chỉ fine-tune khi 4 cái trên fail
+
+```text
+Step 1: Best prompting → đủ chưa? Stop.
+Step 2: Add few-shot example → đủ chưa? Stop.
+Step 3: Try better model (GPT-4o → Claude → o1) → đủ chưa? Stop.
+Step 4: RAG cho knowledge / tool cho compute → đủ chưa? Stop.
+Step 5: Vẫn không đủ → fine-tune.
+```
+
+90% project dừng ở step 1-4.
+
+---
+
+## 3. 10% trường hợp: Fine-tune thật sự cần
+
+### 3.1. Style / tone consistency
+
+Bạn có brand voice mạnh, prompt 200 chữ vẫn không capture.
+
+Ví dụ:
+
+- Chatbot company law với tone formal Việt Nam đặc thù.
+- Marketing copy theo style 1 brand cụ thể (Apple, Disney).
+- Chatbot RP character với tính cách phức tạp.
+
+Fine-tune trên 500-2000 example brand → model nội hóa style. Prompt
+ngắn lại, latency giảm.
+
+### 3.2. Output format strict, repeatable
+
+Cần JSON output theo schema phức tạp, prompt đôi khi miss.
+
+Fine-tune → 99.9% output correct format. Tiết kiệm validation +
+retry logic.
+
+### 3.3. Domain language đặc thù
+
+Medical, legal, financial — terminology + reasoning pattern không có
+trong general training data đủ.
+
+Fine-tune trên 5K-50K medical case study → model hiểu thuật ngữ và
+reasoning đúng cách.
+
+### 3.4. Latency / cost extreme
+
+Bạn có 1B request/tháng. Mỗi request prompt 5K token → cost khủng.
+
+Fine-tune model nhỏ (Llama 8B) → prompt giảm 90% (rule đã trong
+weights), inference rẻ hơn 10-100x.
+
+Chỉ make sense khi scale **rất lớn**.
+
+### 3.5. Privacy / on-device
+
+Cần model chạy on laptop user, < 8GB RAM. Phải dùng small model
+(Llama 3.2 3B), prompt-only không đủ → fine-tune để bù.
+
+### 3.6. Specialized capability
+
+Code completion cho 1 ngôn ngữ niche (COBOL, Verilog), math reasoning
+cho domain riêng (chemistry, ML research).
+
+Pre-trained model không đủ exposure → fine-tune adds capability.
+
+---
+
+## 4. 4 loại fine-tuning
+
+### 4.1. Full fine-tuning
+
+Update **toàn bộ** weights model.
+
+```text
+Model 70B parameters → all 70B updated
+```
+
+**Ưu**: tối đa flexibility, kết quả tốt nhất.
+**Nhược**: cần GPU khổng lồ (>200GB VRAM cho 70B), $$$$, dễ
+catastrophic forgetting.
+
+**Khi dùng**: provider lớn (Anthropic, OpenAI, Meta tự fine-tune
+để release model). Hiếm khi dev cá nhân/startup làm.
+
+### 4.2. LoRA (Low-Rank Adaptation)
+
+**Innovation 2021** thay đổi luật chơi. Idea:
+
+```text
+Thay vì update toàn bộ matrix W (size N × M),
+học 2 matrix nhỏ A (N × r) và B (r × M)
+với r << min(N, M)
+
+Update: W' = W + A × B
+```
+
+Với r = 8-32, LoRA chỉ update **0.1-1%** parameters của model. Train
+nhanh 10-100x, VRAM ít 5-10x.
+
+```text
+Llama 70B fine-tune:
+  Full: $50K-100K trên cluster GPU
+  LoRA: $200-2000 trên 1-4 GPU consumer
+```
+
+Quality LoRA = ~95% full fine-tune cho hầu hết task. **Default lựa
+chọn** cho dev.
+
+### 4.3. QLoRA (Quantized LoRA)
+
+LoRA + quantize base model 4-bit.
+
+```text
+Base model: load 4-bit (nhỏ 4x VRAM so với fp16)
+LoRA adapter: train fp16 (nhỏ, OK)
+
+Result: fine-tune 70B model trên 1× RTX 4090 (24GB)
+```
+
+**Ưu**: democratize fine-tune. Dev cá nhân có thể fine-tune model
+70B.
+
+**Nhược**: quality giảm ~5-10% so với LoRA full precision.
+
+### 4.4. Instruction tuning
+
+Format đặc biệt: train model trên `(instruction, input, output)`
+triplet để học **theo chỉ thị**.
+
+```text
+{
+  "instruction": "Translate to formal Vietnamese",
+  "input": "Hi",
+  "output": "Kính gửi anh"
+}
+```
+
+Đây là **loại fine-tune đa số bạn cần** cho task practical. Mọi
+"chat model" (Llama Instruct, Mistral Instruct) đều là instruction-
+tuned từ base model.
+
+### 4.5. So sánh
+
+| Type                     | Cost | Speed      | Quality | Use case           |
+| ------------------------ | ---- | ---------- | ------- | ------------------ |
+| Full                     | $$$$ | Chậm       | Top     | Provider, research |
+| LoRA                     | $$   | Trung bình | 95%     | Default dev        |
+| QLoRA                    | $    | Nhanh      | 90%     | Cost-sensitive     |
+| Instruction (LoRA-based) | $$   | Trung bình | 95%     | Task-specific app  |
+
+---
+
+## 5. Data preparation — 80% công việc
+
+Fine-tune fail thường vì **data**, không phải technique. Chuẩn bị data
+chiếm 80% effort.
+
+### 5.1. Format
+
+Conversational format (most common):
+
+```jsonl
+{"messages": [
+  {"role": "system", "content": "You are a formal Vietnamese translator"},
+  {"role": "user", "content": "Hi John"},
+  {"role": "assistant", "content": "Kính gửi anh John"}
+]}
+{"messages": [...]}
+{"messages": [...]}
+```
+
+Hoặc instruction format:
+
+```jsonl
+{
+  "instruction": "Translate to formal Vietnamese",
+  "input": "Hi",
+  "output": "Kính gửi anh"
+}
+```
+
+### 5.2. Quantity
+
+| Use case               | Min example | Sweet spot |
+| ---------------------- | ----------- | ---------- |
+| Style/tone consistency | 100         | 500-2000   |
+| Format enforcement     | 50          | 200-500    |
+| Domain knowledge       | 1000        | 10K-50K    |
+| New capability         | 10K         | 50K-500K   |
+
+Quá ít (< 50) → không học được gì. Quá nhiều cùng pattern → overfit.
+
+### 5.3. Quality > Quantity
+
+100 example chất lượng cao > 10000 example garbage.
+
+Quality criteria:
+
+- **Đúng**: output thực sự đúng (không sai sót).
+- **Diverse**: cover edge case, không chỉ happy path.
+- **Consistent**: cùng style/format throughout.
+- **Representative**: phân phối giống production traffic.
+
+Tạo data:
+
+1. **Manual write**: chậm nhưng quality nhất, cho 50-200 example đầu.
+2. **Existing logs**: từ system production (clean, anonymize).
+3. **LLM-generated + human review**: GPT-4 sinh, người review.
+4. **Hybrid**: bootstrap manual, expand LLM, audit human.
+
+### 5.4. Train / val / test split
+
+```text
+Total: 1000 example
+├── Train: 80% = 800
+├── Val: 10% = 100   ← monitor overfit during training
+└── Test: 10% = 100  ← final eval, không touch trong dev
+```
+
+Test set **không bao giờ** dùng để tune hyperparameter. Một khi đã
+"peek", nó không còn objective.
+
+### 5.5. Anti-pattern data
+
+❌ Toàn data ngắn / dài giống hệt nhau → model overfit length.
+❌ System prompt khác nhau giữa example → model không biết theo cái nào.
+❌ Edge case không có → fail production.
+❌ PII (email, phone, name thật) → leak.
+❌ Adversarial input (jailbreak, prompt injection) → xét cẩn thận.
+
+---
+
+## 6. Process thực tế
+
+### 6.1. Provider API (dễ nhất)
+
+OpenAI:
+
+```bash
+# Upload data
+openai files create --file train.jsonl --purpose fine-tune
+
+# Start job
+openai fine_tuning.jobs.create \
+  -m gpt-4o-mini \
+  --training_file file-abc123 \
+  --validation_file file-xyz789
+
+# Monitor
+openai fine_tuning.jobs.list
+
+# Use
+openai api chat.completions.create \
+  -m ft:gpt-4o-mini:org:custom-name:abc123 \
+  --message ...
+```
+
+Anthropic, Google Vertex AI có flow tương tự.
+
+**Ưu**: zero infrastructure, support tốt.
+**Nhược**: bị provider lock, model không tải về được, chỉ
+1-2 model cho fine-tune.
+
+### 6.2. Self-host (Llama, Mistral)
+
+Stack phổ biến:
+
+- **Hugging Face Transformers**: foundation library
+- **PEFT**: implement LoRA / QLoRA
+- **TRL**: instruction tuning framework
+- **Axolotl**: opinionated wrapper, dễ dùng nhất
+- **Unsloth**: 2x faster, less VRAM
+- **vLLM** / **llama.cpp**: serve trained model
+
+Ví dụ minimal Axolotl config:
+
+```yaml
+base_model: meta-llama/Llama-3.3-8B
+model_type: LlamaForCausalLM
+load_in_4bit: true
+
+datasets:
+  - path: ./train.jsonl
+    type: chat_template
+
+adapter: qlora
+lora_r: 32
+lora_alpha: 64
+lora_dropout: 0.05
+
+micro_batch_size: 2
+gradient_accumulation_steps: 4
+num_epochs: 3
+learning_rate: 0.0002
+
+output_dir: ./output
+```
+
+Run: `axolotl train config.yaml`
+
+**Ưu**: control tuyệt đối, model tự host, không vendor lock.
+**Nhược**: setup phức tạp, GPU $$$, learning curve.
+
+### 6.3. Cloud GPU
+
+Tự host nhưng không mua GPU:
+
+- **RunPod**: H100 $2-4/h, A100 $1-2/h
+- **Lambda Labs**: A100 cluster
+- **Modal**: serverless GPU
+- **Vast.ai**: GPU spot market
+
+Cho 1 fine-tune Llama 8B với LoRA, ~$10-50.
+
+---
+
+## 7. Hyperparameters — cần biết
+
+Không phải chỉnh hết. Vài cái quan trọng:
+
+### 7.1. Learning rate
+
+Quyết định "step size" mỗi update.
+
+- Quá cao (1e-3): model "explode", quên pre-training.
+- Quá thấp (1e-6): học chậm, không converge.
+- **Default**: 2e-4 cho LoRA, 1e-5 cho full fine-tune.
+
+### 7.2. Number of epochs
+
+1 epoch = train 1 lần qua toàn bộ data.
+
+- 1 epoch: thường không đủ.
+- 2-3 epoch: sweet spot cho hầu hết case.
+- 5+ epoch: dễ overfit.
+
+Monitor val loss: nếu val loss tăng trong khi train loss giảm → bắt
+đầu overfit, dừng.
+
+### 7.3. Batch size
+
+Số example xử lý parallel.
+
+- Lớn (32+): training stable, cần VRAM nhiều.
+- Nhỏ (1-4): VRAM ít, noisy hơn.
+
+Dùng "gradient accumulation" để mô phỏng batch lớn với VRAM nhỏ:
+
+```text
+micro_batch_size: 2
+gradient_accumulation_steps: 8
+→ effective batch size = 16
+```
+
+### 7.4. LoRA rank `r`
+
+Quan trọng nhất với LoRA.
+
+- r = 4-8: nhẹ, đủ cho task style nhỏ.
+- r = 16-32: default, balance.
+- r = 64-128: cho task khó, gần full fine-tune.
+
+Cao hơn = nhiều parameter trainable = mạnh hơn nhưng cũng dễ overfit
+
+- chậm hơn.
+
+---
+
+## 8. 6 cạm bẫy
+
+### 8.1. Overfitting
+
+Symptom: train loss thấp, val loss cao, model "thuộc lòng" data train,
+fail trên data mới.
+
+Fix:
+
+- Tăng data
+- Giảm epoch
+- Tăng dropout
+- Validation split + early stopping
+
+### 8.2. Catastrophic forgetting
+
+Symptom: model fine-tune "quên" general knowledge.
+
+```text
+Pretrained Llama 70B: trả lời mọi câu hỏi tốt
+Sau fine-tune đặc trị math: chỉ giỏi math, mất khả năng chat thường
+```
+
+Fix:
+
+- LoRA thay vì full fine-tune (giữ base weights)
+- Mix general data + specialized data trong training set
+- Lower learning rate
+
+### 8.3. Data leakage
+
+Test data dùng vào training (vô tình) → metric inflate, fail production.
+
+Fix:
+
+- Split data trước khi train, không sau
+- Hash check: test set không có example nào trong train set
+- Time-based split nếu có temporal aspect
+
+### 8.4. Reward hacking
+
+Khi fine-tune với reward signal (RLHF), model "game" reward thay vì
+học behavior thật.
+
+```text
+Reward: ngắn gọn được điểm cao
+Model học: trả lời 1 từ "ok" cho mọi câu → max reward, useless
+```
+
+Fix:
+
+- Reward đa chiều
+- Human review periodic
+- Don't over-optimize 1 metric
+
+### 8.5. Distributional mismatch
+
+Train data ≠ production data → fine-tune không transfer.
+
+```text
+Train: clean text từ docs
+Production: messy chat, typo, slang
+→ Model fail
+```
+
+Fix:
+
+- Production logs → training set (sau cleaning)
+- Adversarial example trong train
+
+### 8.6. Wrong base model
+
+Fine-tune model nhỏ cho task model lớn không giải được:
+
+```text
+Llama 8B fine-tune trên math → vẫn fail
+Llama 70B prompt-only → giải được
+```
+
+Capability có **floor**. Fine-tune không tạo capability mới (rất khó),
+nó **specialize** capability có sẵn.
+
+Fix: chọn base model có capability đủ trước khi fine-tune.
+
+---
+
+## 9. Cost analysis thực tế
+
+### 9.1. Provider API (OpenAI gpt-4o-mini)
+
+```text
+Training cost: $3 / 1M training tokens
+Inference cost: 2x base model price
+
+Example:
+  - Data: 5K example × 500 token = 2.5M tokens
+  - Training cost: $7.5
+  - Total prep + training: ~$50-100
+
+  - Inference: gpt-4o-mini fine-tuned ~ $0.30 / 1M input
+    (vs $0.15 base) → 2x cost mỗi query
+```
+
+### 9.2. Self-host LoRA Llama 8B
+
+```text
+Hardware: 1× A100 40GB rented = $1.5/h
+Training time: ~4-8h cho 5K example × 3 epoch
+Training cost: $6-12
+
+Inference: tự host
+  - Vast.ai GPU $0.5-1/h
+  - Throughput ~2K token/s = ~7M token/h
+  - Cost ~$0.07-0.15 / 1M token
+  → rẻ hơn cloud API 5-10x
+```
+
+Self-host break-even khi traffic > ~100M token/tháng.
+
+### 9.3. Self-host Llama 70B QLoRA
+
+```text
+Hardware: 1× H100 80GB rented = $3-5/h
+Training time: 12-24h cho 5K example × 3 epoch
+Training cost: $40-120
+
+Inference: 1× A100 80GB = $2/h
+  Throughput ~500 token/s
+  → cần 4× GPU cho 2K token/s
+  → fixed cost cao
+```
+
+Chỉ make sense scale rất lớn.
+
+---
+
+## 10. Eval — đo fine-tune có work không
+
+### 10.1. Quantitative
+
+- **Accuracy** (cho classification task)
+- **BLEU / ROUGE** (cho generation, so với reference)
+- **Exact match** (cho structured output)
+- **Latency** (P50, P95, P99)
+- **Hallucination rate** (LLM judge)
+
+### 10.2. Qualitative
+
+- **Side-by-side comparison**: 100 sample, đánh giá blind base vs
+  fine-tuned. Người review chọn.
+- **Production A/B test**: route 10% traffic, monitor user feedback.
+- **Expert review**: với domain task, expert đánh giá output.
+
+### 10.3. Fine-tuning pitfall: looks-good-on-paper
+
+Metric tốt, production tệ. Lý do:
+
+- Eval set không đại diện
+- Overfit hidden trong metric
+- Distributional mismatch
+
+**Mọi fine-tune phải A/B test thực tế** trước khi deploy 100%.
+
+---
+
+## 11. Tổng kết
+
+Fine-tuning là tool mạnh **nhưng không phải first resort**.
+
+Quyết định framework:
+
+```text
+1. Prompt engineering thật cẩn thận → đủ chưa? STOP.
+2. Few-shot example → đủ chưa? STOP.
+3. Better model → đủ chưa? STOP.
+4. RAG cho knowledge / Tool cho compute → đủ chưa? STOP.
+5. LoRA fine-tune trên task-specific data.
+6. Full fine-tune chỉ khi LoRA không đủ + có budget.
+```
+
+Khi fine-tune:
+
+- **Quality data > quantity**. 500 example tốt > 10K example xoàng.
+- **LoRA / QLoRA** là default. Full fine-tune là exception.
+- **Eval objective**, không tin metric mù.
+- **A/B test** trước deploy.
+
+Cuối cùng: fine-tune là **specialization**, không phải capability
+addition. Chọn base model đủ tốt trước, sau đó fine-tune để specialize.
+
+Đó là 90% bí quyết đằng sau "fine-tune thành công".
+
+---
+
+### Đọc thêm
+
+- [RAG Guide](/blog/rag-retrieval-augmented-generation-guide)
+- [LLM Models Comparison](/blog/llm-models-comparison-guide)
+- [Prompting Fundamentals](/blog/llm-prompting-fundamentals)
+- [Tokens & Pricing](/blog/ai-tokens-and-pricing-explained)
+- [Agent Architecture](/blog/agent-architecture-deep-dive)
+
+### Reference
+
+- LoRA paper — Hu et al. 2021 ([arxiv.org/abs/2106.09685](https://arxiv.org/abs/2106.09685))
+- QLoRA — Dettmers et al. 2023
+- Hugging Face PEFT documentation
+- Axolotl — [github.com/OpenAccess-AI-Collective/axolotl](https://github.com/OpenAccess-AI-Collective/axolotl)
+- Unsloth — [github.com/unslothai/unsloth](https://github.com/unslothai/unsloth)

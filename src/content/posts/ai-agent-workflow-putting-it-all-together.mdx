@@ -1,0 +1,585 @@
+---
+title: 'Putting It All Together — 1 feature từ ticket đến deploy với AI agent'
+description: 'Case study end-to-end: implement reading progress indicator cho blog Astro. Đi qua đủ 4 pha (Plan → Scaffold → Build → Polish), dùng Rules + Skills + Sub-agent, review AI output, debug 1 edge case thật. Khép lại series Coding Agents.'
+pubDate: 2026-04-30
+tags: [ai, coding-agent, case-study, workflow, productivity]
+draft: false
+---
+
+7 bài trước trong series đã đi qua từng skill riêng lẻ — làm việc với
+agent, hiểu codebase, develop, debug, review, customize. Bài cuối này
+gộp tất cả lại thành **1 case study thật**: tôi sẽ ship 1 feature cho
+chính blog này từ đầu đến cuối, để bạn thấy workflow hoạt động ra sao
+khi gắn vào real project.
+
+Feature: **Reading progress indicator** — thanh bar trên cùng trang
+post, fill theo lượng đã scroll.
+
+Nghe đơn giản. Thực tế có kha khá điểm chìm — accessibility, performance,
+edge case với layout khác nhau. Đủ để minh họa mọi thứ.
+
+---
+
+## Setup trước — customization đã có
+
+Blog này đã có sẵn tầng 1+2 customization:
+
+```text
+.cursor/rules/
+├── coding-standards.mdc     (alwaysApply)
+├── typescript.mdc
+├── astro-components.mdc
+├── tailwind-styling.mdc
+├── mdx-content.mdc
+└── git-commits.mdc          (manual)
+```
+
+Nghĩa là khi tôi mở Cursor, agent đã biết:
+
+- Stack Astro 5 + TypeScript strict + Tailwind 4
+- Design tokens ở `global.css` (`bg`, `fg`, `accent`, `border`)
+- Component naming PascalCase
+- Path alias `~/`
+- Convention commit message
+
+Không phải re-explain mỗi lần. Setup này tôi đã ship qua
+[bài Cursor Rules](/blog/cursor-rules-guide).
+
+---
+
+## Pha 1 — PLAN (12 phút)
+
+### Ticket đầu vào
+
+> "Reading progress bar cho blog post. Thanh fill từ trái sang phải khi
+> user scroll. Style lime match accent token. Chỉ hiện trong post
+> detail, không hiện trang chủ / list."
+
+### Prompt plan mode
+
+Mở chat mode (không agent mode), attach file cần thiết:
+
+```text
+"@src/layouts/PostLayout.astro @src/pages/blog/[...slug].astro
+@src/styles/global.css
+
+Task: add reading progress bar.
+
+Trước khi code, plan:
+1. File nào edit, file nào tạo mới
+2. 2-3 approach kỹ thuật khác nhau (pros/cons)
+3. Edge case cần xử lý (nested scroll, no-JS, reduce motion)
+4. Accessibility considerations
+5. Risk / open question
+
+KHÔNG code. Hỏi tôi nếu mơ hồ."
+```
+
+### Output của AI (tôi edit lại)
+
+**Approach options:**
+
+| Option                                | Cơ chế                          | Pros         | Cons                        |
+| ------------------------------------- | ------------------------------- | ------------ | --------------------------- |
+| A. `scroll` event + state             | Listen scroll, calc %, setState | Dễ           | Re-render nhiều             |
+| B. CSS `animation-timeline: scroll()` | Pure CSS                        | 0 JS, native | Browser support ~85% (2026) |
+| C. IntersectionObserver + CSS var     | Update custom prop              | Ít re-render | Phức tạp hơn A              |
+
+**Decision**: chọn **B primary, fallback A**. Modern browser dùng CSS,
+Safari cũ fallback JS minimal.
+
+**Files:**
+
+- CREATE: `src/components/blog/ReadingProgress.astro`
+- EDIT: `src/layouts/PostLayout.astro` (mount component)
+- KHÔNG edit global.css (style inline trong component)
+
+**Edge cases:**
+
+- No-JS + browser không support CSS scroll timeline → không hiện bar
+  (graceful degradation, không báo lỗi).
+- `prefers-reduced-motion` → không animate.
+- Post rất ngắn (fit trong viewport) → không cần bar, ẩn đi.
+- Keyboard scroll, programmatic scroll → vẫn update.
+
+**Accessibility:**
+
+- Decorative element → `role="progressbar"` với aria-label + aria-valuenow.
+- Mà vì chỉ cosmetic, tôi quyết định dùng `aria-hidden="true"` để
+  screen reader không đọc (progress bar kiểu decorative, user đã có
+  scroll bar native).
+
+**Risks:**
+
+- R1: Position fixed của bar + sticky header có thể conflict — cần test.
+
+**Open questions:**
+
+- Q1: Bar trên hay dưới header? → **Trên** (full top, trước header).
+- Q2: Height? → **2px**, đủ thấy không intrusive.
+
+### Gate pha 1
+
+Tôi đọc plan, OK. Save vào `.specs/reading-progress.plan.md` tạm thời
+(sẽ xóa sau khi ship). Sang pha 2.
+
+---
+
+## Pha 2 — SCAFFOLD (5 phút)
+
+### Prompt
+
+```text
+"Dựa trên @.specs/reading-progress.plan.md, scaffold file:
+src/components/blog/ReadingProgress.astro
+
+Yêu cầu:
+- Props interface với optional color, height, zIndex
+- Default values match design tokens
+- Comment JSDoc mô tả props
+- Body chỉ có TODO markers cho từng phần (CSS, fallback JS)
+- KHÔNG implement logic"
+```
+
+### Output
+
+```astro
+---
+interface Props {
+  /** CSS color value, default uses accent token */
+  color?: string;
+  /** Height in px, default 2 */
+  height?: number;
+  /** Stack above everything, default 100 */
+  zIndex?: number;
+}
+
+const { color = 'var(--color-accent)', height = 2, zIndex = 100 } = Astro.props;
+---
+
+{/* TODO: progress bar element */}
+{/* TODO: CSS with animation-timeline scroll() */}
+{/* TODO: JS fallback for unsupported browsers */}
+
+<style define:vars={{ color, height: `${height}px`, zIndex }}>
+  /* TODO */
+</style>
+
+<script>
+  /* TODO fallback */
+</script>
+```
+
+Clean. Đúng style codebase. Type-safe. Không có logic → review nhanh.
+
+### Gate pha 2
+
+Type signature hợp lý, props name rõ, default đúng tokens. OK → build.
+
+---
+
+## Pha 3 — BUILD (35 phút)
+
+### Vertical slice 1: CSS-only version
+
+Prompt:
+
+```text
+"Implement vertical slice 1: CSS-only progress bar dùng
+animation-timeline: scroll(root).
+
+- Bar fixed top, width từ 0% → 100%
+- Dùng define:vars đã khai báo (color, height, zIndex)
+- aria-hidden='true'
+- Không có JS, không polyfill
+
+Sau khi implement, tôi test manual trên Chrome 130."
+```
+
+AI output 1 HTML div + CSS block:
+
+```astro
+<div class="reading-progress" aria-hidden="true">
+  <div class="reading-progress__bar"></div>
+</div>
+
+<style define:vars={{ color, height: `${height}px`, zIndex }}>
+  .reading-progress {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: var(--height);
+    z-index: var(--zIndex);
+    background: transparent;
+    pointer-events: none;
+  }
+  .reading-progress__bar {
+    height: 100%;
+    width: 100%;
+    background: var(--color);
+    transform-origin: left;
+    animation: scale-x linear;
+    animation-timeline: scroll(root);
+  }
+  @keyframes scale-x {
+    from {
+      transform: scaleX(0);
+    }
+    to {
+      transform: scaleX(1);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .reading-progress__bar {
+      animation: none;
+    }
+  }
+</style>
+```
+
+Tôi mount vào PostLayout:
+
+```astro
+---
+import ReadingProgress from '~/components/blog/ReadingProgress.astro';
+---
+
+<ReadingProgress />
+<!-- rest of layout -->
+```
+
+Test Chrome → **work perfect**. Bar scale từ 0 đến 1 theo scroll.
+
+### Vertical slice 2: JS fallback cho Safari
+
+Safari 17.4 (và earlier) chưa support `scroll()` timeline. Cần
+fallback:
+
+```text
+"Implement vertical slice 2: JS fallback khi browser không support
+animation-timeline.
+
+- Detect support: CSS.supports('animation-timeline: scroll()')
+- Nếu không support, listen scroll event với rAF throttle
+- Update CSS custom property --progress với value 0→1
+- CSS rule fallback dùng transform: scaleX(var(--progress))
+
+Viết trong <script> block của component. Không dùng library ngoài."
+```
+
+AI output:
+
+```astro
+<script>
+  const supportsScrollTimeline = CSS.supports('animation-timeline: scroll()');
+  if (supportsScrollTimeline) {
+    // Browser supports native, no JS needed
+  } else {
+    const bar = document.querySelector('.reading-progress__bar') as HTMLElement;
+    if (!bar) {
+      /* no-op */
+    } else {
+      let rafId = 0;
+      const update = () => {
+        const scrolled = window.scrollY;
+        const max = document.documentElement.scrollHeight - window.innerHeight;
+        const progress = max > 0 ? Math.min(1, scrolled / max) : 0;
+        bar.style.setProperty('--progress', String(progress));
+        rafId = 0;
+      };
+      window.addEventListener(
+        'scroll',
+        () => {
+          if (rafId === 0) rafId = requestAnimationFrame(update);
+        },
+        { passive: true }
+      );
+      update();
+    }
+  }
+</script>
+```
+
+Và thêm CSS:
+
+```css
+.reading-progress__bar {
+  transform: scaleX(var(--progress, 0));
+}
+```
+
+Đoạn `animation-timeline` sẽ override khi browser support, CSS fallback
+dùng `--progress`.
+
+### Gate pha 3
+
+- Chrome 130 (hỗ trợ): bar mượt, CSS-only, 0 JS cost.
+- Safari 17 (không hỗ trợ): JS fallback chạy, bar vẫn work.
+- Build pass, không lỗi type.
+
+---
+
+## Pha 4 — POLISH (20 phút)
+
+### AI self-review
+
+```text
+"Review @src/components/blog/ReadingProgress.astro:
+1. Edge case: post ngắn < viewport, no-JS user, reduced-motion
+2. Performance: scroll listener có throttle đúng chưa?
+3. Accessibility
+4. Style consistency với codebase
+5. Có gì có thể đơn giản hơn không?
+
+Report issue, KHÔNG fix."
+```
+
+AI report 4 issue:
+
+1. **Post ngắn**: Khi `scrollHeight === innerHeight`, `max === 0` →
+   bar luôn 0%. OK về mặt không lỗi, nhưng bar vẫn hiện. Xấu UX.
+2. **No-JS**: CSS-only path work. JS-fallback path không work. OK,
+   graceful.
+3. **Component không unmount cleanup**: scroll listener gắn không gỡ.
+   Blog mỗi page là static HTML mới → OK thực tế, nhưng nếu sau này
+   dùng Astro view transitions → leak.
+4. **Type cast**: `as HTMLElement` dùng bare. Nên check `null`.
+
+### Fix issue
+
+Issue 1 (ẩn khi post ngắn):
+
+```css
+.reading-progress {
+  /* Hidden if content fits viewport */
+  display: none;
+}
+@media (min-height: 1px) {
+  /* Use CSS container query would be ideal, fallback to JS check */
+}
+```
+
+Thực ra CSS thuần khó check scroll height. Dùng JS detect:
+
+```ts
+const isScrollable = document.documentElement.scrollHeight > window.innerHeight;
+if (!isScrollable) {
+  document.querySelector('.reading-progress')?.setAttribute('hidden', '');
+}
+```
+
+Issue 3 (cleanup):
+
+```ts
+document.addEventListener('astro:before-swap', () => {
+  // Cleanup nếu sau này enable view transitions
+  // (no-op cho MPA hiện tại)
+});
+```
+
+Issue 4: đổi `as HTMLElement` thành narrow type guard.
+
+### Test cases
+
+Thêm tests `src/components/blog/ReadingProgress.test.ts`:
+
+- Bar exists in DOM
+- `aria-hidden` = true
+- CSS var `--color` default = `var(--color-accent)`
+- Hidden attribute khi scrollHeight ≤ innerHeight
+
+### Manual browser test
+
+- Chrome 130 — CSS-only: ✅
+- Safari 17 — JS fallback: ✅
+- Firefox 130 — CSS-only (Firefox support từ 128): ✅
+- Post dài 5000 chữ — scroll smooth, bar update 60fps: ✅
+- Post 200 chữ fit viewport — bar hidden: ✅
+- `prefers-reduced-motion: reduce` enabled — animation disabled: ✅
+
+---
+
+## Pha 5 — SHIP (5 phút)
+
+### Commit
+
+Dùng skill `git-commits` (manual trigger):
+
+```text
+@git-commits
+
+Diff: [paste từ git diff main]
+```
+
+AI suggest:
+
+```text
+feat(blog): add reading progress indicator
+
+CSS-only implementation using animation-timeline: scroll() for modern
+browsers (Chrome 115+, Firefox 128+, Safari 26+). JS fallback for older
+Safari using rAF-throttled scroll listener updating a CSS custom
+property.
+
+- Hidden on posts that fit viewport (no scroll needed)
+- Respects prefers-reduced-motion
+- aria-hidden (decorative, complements native scrollbar)
+- Uses --color-accent design token
+```
+
+Tôi accept, commit.
+
+### Push + verify deploy
+
+```bash
+git push origin main
+```
+
+Cloudflare Pages (hoặc GH Pages với workflow đã có) auto-build và
+deploy. Sau 30s, live trên production.
+
+Tổng thời gian: **~1h 20m** từ ticket đến production.
+
+---
+
+## Lessons từ case study này
+
+### 1. Rules làm nền → AI không hỏi basic question
+
+Agent không hỏi "dùng framework gì", "path alias thế nào" — nó biết sẵn
+qua Rules. Tôi tiết kiệm 15-20% thời gian mỗi task.
+
+### 2. Plan pha riêng tránh rework
+
+Pha 1 tôi đã spot được option B (CSS-only) tốt hơn option A (JS) —
+trước khi viết 1 dòng code. Nếu nhảy thẳng vào code, tôi đã write 50
+dòng JS trước khi nhận ra CSS đẹp hơn.
+
+### 3. Vertical slice > Big bang
+
+Slice 1 (CSS-only) + Slice 2 (JS fallback) — mỗi slice demo được độc
+lập. Nếu ship ngay slice 1 cũng đã cover 85% user (modern browser).
+
+### 4. AI review catch được cái mắt tôi miss
+
+Issue 1 (post ngắn) — tôi không nghĩ ra vì test toàn post dài. AI có
+goóc nhìn "đọc code như người lạ" → thấy edge case.
+
+### 5. Test không nhiều, nhưng đủ
+
+4 test case cho 1 component 80 dòng là đủ. Không cần 100% coverage.
+Test cover **behavior quan trọng**, không cover từng prop.
+
+### 6. Manual browser test vẫn cần
+
+Tests unit không catch được "scroll lag 60fps" hay "layout shift khi
+bar xuất hiện". Cross-browser manual vẫn là quality gate quan trọng
+nhất với UI work.
+
+### 7. AI làm việc mechanical, tôi làm việc decision
+
+Tôi quyết định: approach B, 2px height, trên header, aria-hidden. AI
+implement theo. Value của tôi ở decision, không ở typing.
+
+---
+
+## So sánh: cùng feature, không AI
+
+Nếu làm feature này năm 2022 (pre-Copilot X / Cursor):
+
+| Giai đoạn     | Có AI (hôm nay) | Không AI (2022)                     |
+| ------------- | --------------- | ----------------------------------- |
+| Plan          | 12 min          | 30 min (google, đọc MDN)            |
+| Scaffold      | 5 min           | 15 min (gõ tay)                     |
+| Build slice 1 | 10 min          | 40 min (tra CSS animation-timeline) |
+| Build slice 2 | 15 min          | 30 min                              |
+| Polish        | 20 min          | 45 min (đọc lại, tự review)         |
+| Test + manual | 15 min          | 30 min                              |
+| Ship          | 5 min           | 10 min (viết commit tay)            |
+| **Total**     | **~82 min**     | **~200 min**                        |
+
+**2.4x nhanh hơn**. Không phải AI "làm thay" — mà AI rút ngắn mọi chu
+kỳ: lookup docs, scaffold boilerplate, self-review, viết test case,
+viết commit message.
+
+Thời gian tiết kiệm được tôi dùng để:
+
+- Viết bài blog này.
+- Thử thêm 1 approach optional (IntersectionObserver, thấy không đáng).
+- Đọc docs View Transitions API cho feature tiếp theo.
+
+---
+
+## Khép lại series Coding Agents
+
+8 bài viết về cách làm việc với AI agent hiện đại, tôi gói lại trong 3
+nguyên tắc lớn:
+
+### Nguyên tắc 1: Agent là cộng sự, không phải đầy tớ, không phải thần
+
+Không outsource tư duy. Không sợ dùng. Biết điểm mạnh (volume, speed),
+biết điểm yếu (context tribal, verification).
+
+### Nguyên tắc 2: Workflow có kỷ luật > prompt thông minh
+
+Plan → Scaffold → Build → Polish không phải template cứng. Nó là **phản
+xạ tư duy** để tránh những sai lầm tốn thời gian nhất (no plan, accept
+all, skip review).
+
+### Nguyên tắc 3: Verification mindset là cốt lõi, không optional
+
+Review diff, test behavior, reproduce bug trước khi fix, audit
+customization định kỳ. Không có shortcut cho mindset này.
+
+---
+
+## Dev giỏi trong kỷ nguyên agent trông thế nào?
+
+Không phải dev "xài Cursor nhanh". Không phải dev "viết prompt thần".
+
+Mà là dev:
+
+- Biết **khi nào AI giúp**, khi nào code tay.
+- **Review code** sharp hơn mọi thời đại trước.
+- **Chia task** thành chunk AI implement được.
+- **Build customization** phù hợp context team.
+- **Verify** mọi thứ AI đụng vào.
+- **Maintain skill** code tay đủ để debug khi AI fail.
+
+Bộ skill này không có trong trường học. Không có trong LeetCode. Chỉ
+có trong thực hành, thử-sai, đọc-review-ship mỗi ngày.
+
+Series này hy vọng đã cho bạn framework để train những skill đó nhanh
+hơn tôi đã mất 2 năm mò mẫm. Cảm ơn bạn đã đọc đến đây.
+
+Feedback, question, hoặc phản biện — tìm tôi trên
+[socials trong About page](/about).
+
+---
+
+## Toàn bộ series
+
+**Foundation:**
+
+- [AI Hallucination — Vì sao AI bịa](/blog/ai-hallucination-and-how-to-spot-it)
+- [Tokens & Pricing](/blog/ai-tokens-and-pricing-explained)
+
+**Cursor customization:**
+
+- [Cursor Rules](/blog/cursor-rules-guide)
+- [Cursor Skills](/blog/cursor-skills-beginner-guide)
+- [Cursor Sub-agents](/blog/cursor-sub-agents-guide)
+
+**Coding Agents workflow:**
+
+1. [Working with Coding Agents](/blog/working-with-coding-agents)
+2. [Understanding Codebase with AI](/blog/understanding-codebase-with-ai)
+3. [Developing Features with AI](/blog/developing-features-with-ai)
+4. [Finding and Fixing Bugs with AI](/blog/finding-and-fixing-bugs-with-ai)
+5. [Reviewing and Testing Code with AI](/blog/reviewing-and-testing-code-with-ai)
+6. [Customizing AI Agents](/blog/customizing-ai-agents)
+7. **Putting It All Together** (bài này)
+
+Reference bổ sung: [cursor.com/learn](https://cursor.com/learn) — Cursor's
+official course, tiếng Anh.

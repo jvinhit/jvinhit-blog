@@ -1,6 +1,7 @@
 ---
 import { Menu, X } from '@lucide/astro';
 import { SITE, withBase } from '~/lib/site-config';
+import SearchModal from './SearchModal.astro';
 
 interface Props {
   /** Path hiện tại để highlight mục nav đang active */
@@ -61,8 +62,10 @@ const isActive = (href: string): boolean => {
       }
     </nav>
 
-    {/* Right cluster: contact (>=sm) + hamburger (<md) */}
+    {/* Right cluster: search + contact (>=sm) + hamburger (<md) */}
     <div class="flex items-center gap-2">
+      <SearchModal />
+
       <a
         href={`mailto:${SITE.author.email}`}
         class="hidden items-center gap-2 rounded-xs border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 text-xs font-semibold tracking-[0.12em] text-[var(--color-accent-fg)] uppercase transition-colors hover:bg-[var(--color-accent-hover)] sm:inline-flex"
@@ -113,7 +116,9 @@ const isActive = (href: string): boolean => {
           </li>
         ))
       }
-      <li class="mt-2 border-t border-dashed border-[var(--color-border)] px-6 pt-3 pb-4 sm:hidden">
+      <li
+        class="mt-2 border-t border-dashed border-[var(--color-border)] px-6 pt-3 pb-4 sm:hidden"
+      >
         <a
           href={`mailto:${SITE.author.email}`}
           class="inline-flex items-center gap-2 rounded-xs border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 text-xs font-semibold tracking-[0.12em] text-[var(--color-accent-fg)] uppercase hover:bg-[var(--color-accent-hover)]"
@@ -178,11 +183,11 @@ const isActive = (href: string): boolean => {
 
     // Đóng khi click 1 link trong drawer (cho phép navigation diễn ra
     // bình thường nhưng UX feel "menu đóng lại").
-    drawer.querySelectorAll<HTMLAnchorElement>('[data-mobile-link]').forEach(
-      (link) => {
+    drawer
+      .querySelectorAll<HTMLAnchorElement>('[data-mobile-link]')
+      .forEach((link) => {
         link.addEventListener('click', () => setState(false));
-      }
-    );
+      });
 
     // ESC để đóng — match expectation của OS-level menu.
     document.addEventListener('keydown', (e) => {
