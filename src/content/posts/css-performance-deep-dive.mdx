@@ -1,0 +1,922 @@
+---
+title: 'Tối ưu performance CSS — deep dive từ render pipeline tới production'
+description: 'Đi sâu vào cách browser xử lý CSS, chi phí của Layout/Paint/Composite, critical CSS, containment, content-visibility, GPU acceleration, và mọi kỹ thuật giúp CSS không còn là nút thắt performance.'
+pubDate: 2026-04-30
+tags: [performance, css, web-vitals, frontend, rendering]
+draft: false
+---
+
+CSS thường bị xem là "phần dễ" của frontend — viết vài class, set vài
+màu, xong. Nhưng trong production thực tế, CSS lại là một trong những
+thứ ảnh hưởng nặng nhất tới perception performance: nó là
+**render-blocking**, nó tham gia vào **mọi frame** browser vẽ ra, và
+một dòng selector tồi đủ sức làm dropdown của bạn lag 60ms mỗi lần mở.
+
+Bài này đi từ tầng thấp nhất — **render pipeline** của browser — lên
+tầng cao nhất — **architecture & tooling** — để trả lời câu hỏi: *điều
+gì thực sự làm CSS chậm, và làm thế nào để fix nó?* Mọi kỹ thuật đều
+được xếp theo thứ tự "rẻ và hiệu quả ngay" trước, "kỹ lưỡng và mất
+công" sau — bạn không cần áp dụng hết.
+
+---
+
+## Mục lục
+
+1. [Render pipeline — CSS chui vào pixel như thế nào](#1-render-pipeline--css-chui-vào-pixel-như-thế-nào)
+2. [CSS là render-blocking — Critical CSS](#2-css-là-render-blocking--critical-css)
+3. [Loading strategies — preload, media, async](#3-loading-strategies--preload-media-async)
+4. [Cắt giảm CSS — minify, dead code, modular split](#4-cắt-giảm-css--minify-dead-code-modular-split)
+5. [Selector performance — không phải mọi selector đều bằng nhau](#5-selector-performance--không-phải-mọi-selector-đều-bằng-nhau)
+6. [Cost model: Layout, Paint, Composite](#6-cost-model-layout-paint-composite)
+7. [CSS Containment — cô lập subtree](#7-css-containment--cô-lập-subtree)
+8. [`content-visibility` — bỏ qua off-screen](#8-content-visibility--bỏ-qua-off-screen)
+9. [`will-change` & GPU acceleration đúng cách](#9-will-change--gpu-acceleration-đúng-cách)
+10. [Animation performance — chỉ chạy `transform` và `opacity`](#10-animation-performance--chỉ-chạy-transform-và-opacity)
+11. [Modern CSS — Grid, Flexbox, container queries](#11-modern-css--grid-flexbox-container-queries)
+12. [Architecture — Tailwind/atomic vs CSS-in-JS](#12-architecture--tailwindatomic-vs-css-in-js)
+13. [Đo lường — DevTools, Lighthouse, RUM](#13-đo-lường--devtools-lighthouse-rum)
+14. [Checklist](#14-checklist)
+
+---
+
+## 1. Render pipeline — CSS chui vào pixel như thế nào
+
+Trước khi tối ưu bất cứ thứ gì, phải biết CSS được "tiêu thụ" ở đâu
+trong browser. Pipeline rút gọn:
+
+```text
+ HTML ─► Parse ─► DOM ─┐
+                       ├─► Render Tree ─► Layout ─► Paint ─► Composite ─► Pixels
+ CSS  ─► Parse ─► CSSOM┘                    │         │          │
+                                            ▼         ▼          ▼
+                                          (cost)   (cost)     (cost)
+                                          re-flow  re-paint   GPU only
+```
+
+5 giai đoạn quan trọng:
+
+| Stage         | Việc browser làm                                  | Khi nào trigger lại                                        |
+| ------------- | ------------------------------------------------- | ---------------------------------------------------------- |
+| **Parse CSS** | Tokenize bytes → CSSOM tree                       | Mỗi lần CSS thay đổi (HMR, dynamic stylesheet)             |
+| **Style**     | Match selector ↔ DOM node, tính computed style    | DOM/class/inline style thay đổi                            |
+| **Layout**    | Tính geometry: width/height/x/y của mỗi box       | Đổi `width`, `top`, font-size, viewport, thêm/xoá node     |
+| **Paint**     | Vẽ pixel cho từng layer (text, color, shadow…)    | Đổi `color`, `background`, `box-shadow`, `border-radius`   |
+| **Composite** | Ghép các layer lại bằng GPU                       | Đổi `transform`, `opacity`, `filter` (nếu promoted layer)  |
+
+**Quy luật vàng**: stage càng sau pipeline thì càng rẻ. Đụng `Layout`
+là buộc browser tính lại geometry cho **cả subtree** (đôi khi cả document).
+Đụng chỉ `Composite` thì GPU làm trong tích tắc, không tốn CPU main
+thread.
+
+> Toàn bộ phần còn lại của bài viết là **các kỹ thuật để giữ thay đổi
+> ở stage càng cuối càng tốt** — và để giảm thời gian browser tốn ở
+> mỗi stage.
+
+### Frame budget 16ms
+
+Để giữ 60fps, browser phải hoàn thành **toàn bộ** pipeline trên trong
+~16ms mỗi frame (8ms cho 120fps). Mỗi ms CSS làm chậm là một ms ăn vào
+budget vốn đã rất ngắn:
+
+```text
+ frame budget @60fps:  |◄──────── 16.6ms ────────►|
+                       │ JS │ Style │ Layout │ Paint │ Composite │
+ ideal split:          │ ~6 │  ~1   │  ~3    │  ~3   │    ~3     │  ms
+                       └────┴───────┴────────┴───────┴───────────┘
+ quá budget → frame drop, jank, scroll giật
+```
+
+---
+
+## 2. CSS là render-blocking — Critical CSS
+
+Mặc định, browser **không render bất kỳ pixel nào** cho tới khi tất cả
+CSS trong `<head>` đã download và parse xong. Đây là lý do CSS lớn
+trực tiếp giết **First Contentful Paint** và **Largest Contentful Paint**.
+
+```text
+ HTML ─► <link rel="stylesheet"> phát hiện ─► download CSS ─► parse ─► render
+                                              ▲
+                                              │
+                                  toàn bộ thời gian này
+                                  user thấy WHITE SCREEN
+```
+
+### Critical CSS — inline phần above-the-fold
+
+Ý tưởng: tách CSS thành 2 phần:
+
+- **Critical** (~10-14KB): style cho mọi thứ user thấy ở first viewport
+  → inline thẳng vào `<style>` trong `<head>`.
+- **Non-critical**: phần còn lại (footer, modal, page khác) → load
+  bất đồng bộ, không chặn render.
+
+```html
+<head>
+  <style>
+    /* Critical CSS đã được build inline - reset, layout, header, hero */
+    body{margin:0;font-family:system-ui,sans-serif;...}
+    .hero{padding:4rem 1.5rem;...}
+  </style>
+
+  <!-- Non-critical: load async, không block render -->
+  <link
+    rel="preload"
+    href="/styles/main.css"
+    as="style"
+    onload="this.onload=null;this.rel='stylesheet'"
+  />
+  <noscript><link rel="stylesheet" href="/styles/main.css" /></noscript>
+</head>
+```
+
+Tools sinh critical CSS tự động:
+
+- [`critters`](https://github.com/GoogleChromeLabs/critters) — inline
+  ngay trong build, plug được vào Vite/Webpack.
+- [`critical`](https://github.com/addyosmani/critical) — chạy headless
+  Chrome, render thật, extract CSS thật sự được dùng.
+- Astro, Next.js, SvelteKit, Nuxt — đều có built-in extract critical
+  CSS theo route.
+
+> Giới hạn 14KB không phải con số ma thuật — nó là kích thước **TCP
+> initial congestion window** sau slow start. CSS nhỏ hơn 14KB thường
+> về trong 1 round-trip đầu tiên.
+
+### Pitfall của critical CSS
+
+- **Inline quá nhiều** → HTML phình to, mất lợi ích của HTTP cache
+  cho CSS file riêng. Chỉ inline phần thật sự above-the-fold.
+- **Out of sync với main CSS** → đổi design nhưng quên rebuild
+  critical → flash khi swap.
+- **JavaScript phải bật** với pattern `onload="this.rel='stylesheet'"`
+  → luôn để `<noscript>` fallback.
+
+---
+
+## 3. Loading strategies — `preload`, `media`, `async`
+
+### `media` — chỉ tải CSS khi cần
+
+Browser luôn download mọi `<link rel="stylesheet">`, **nhưng chỉ
+render-block những file mà `media` query khớp** với device hiện tại.
+
+```html
+<!-- Render-block: luôn áp dụng -->
+<link rel="stylesheet" href="/main.css" />
+
+<!-- Tải nhưng KHÔNG block render trên mobile -->
+<link rel="stylesheet" href="/desktop.css" media="(min-width: 1024px)" />
+
+<!-- Tải nhưng KHÔNG block render trừ khi in -->
+<link rel="stylesheet" href="/print.css" media="print" />
+```
+
+Pattern hữu ích: tách CSS dài dòng (animation, modal, dropdown) sang
+file riêng với `media="print"` rồi đổi runtime — file vẫn được tải
+song song nhưng không chặn FCP:
+
+```html
+<link
+  rel="stylesheet"
+  href="/non-critical.css"
+  media="print"
+  onload="this.media='all'"
+/>
+```
+
+### `preload` cho CSS quan trọng nhưng load qua JS
+
+Nếu vì lý do nào đó CSS được load runtime (lazy route, theme switching),
+preload trước để browser bắt đầu request sớm:
+
+```html
+<link rel="preload" href="/styles/dark-theme.css" as="style" />
+```
+
+### Anti-pattern: `@import` trong CSS
+
+```css
+/* ❌ main.css */
+@import url('reset.css');
+@import url('typography.css');
+```
+
+`@import` tạo **waterfall** — browser phải parse `main.css` xong mới
+phát hiện ra cần tải tiếp `reset.css` và `typography.css`. Mỗi `@import`
+lồng nhau là thêm 1 round-trip.
+
+```text
+   parse main.css  ──►  discover @import  ──►  download reset.css  ──►  parse  ──►  ...
+   ───────────────►◄─── WAIT ─────►◄───── WAIT ─────►◄──── WAIT ────►
+```
+
+Thay bằng nhiều `<link rel="stylesheet">` song song trong HTML, hoặc
+bundle bằng build tool — browser tải concurrent, không waterfall.
+
+---
+
+## 4. Cắt giảm CSS — minify, dead code, modular split
+
+### Minify
+
+Bất cứ build tool nào (Vite, Next.js, Astro) đều minify CSS mặc định.
+Nếu bạn vẫn ship CSS không minify trong prod thì đó là bug config —
+fix trước mọi thứ khác.
+
+```text
+  before:  body { background-color: #ffffff;  margin: 0; }   45 bytes
+  after:   body{background-color:#fff;margin:0}              35 bytes  (-22%)
+```
+
+### Dead code elimination
+
+Theo [HTTP Archive](https://almanac.httparchive.org/en/2024/css), trang
+trung bình có **~60% CSS không bao giờ được dùng**. Phần lớn đến từ
+framework UI (Bootstrap full bundle, MUI, Ant Design) hoặc utility CSS
+ship hết toàn bộ atom.
+
+3 phương án theo độ tin cậy tăng dần:
+
+#### a. PurgeCSS / Tailwind JIT — static analysis
+
+Tailwind 3+ scan source files theo glob, **chỉ generate class thực
+sự xuất hiện** trong code. Output thường < 20KB:
+
+```ts
+// tailwind.config.ts
+export default {
+  content: [
+    './src/**/*.{astro,html,ts,tsx,vue,svelte,mdx}',
+  ],
+  // ...
+};
+```
+
+Pitfall: **không match được class build động**:
+
+```tsx
+// ❌ Tailwind không scan được
+const color = isError ? 'red' : 'green';
+className={`text-${color}-500`}
+
+// ✅ Liệt kê đầy đủ
+className={isError ? 'text-red-500' : 'text-green-500'}
+```
+
+#### b. CSS Modules — scoped per component
+
+Build tool hash class name, chỉ ship CSS của component được import:
+
+```css
+/* Button.module.css */
+.primary { background: blue; }
+```
+
+```tsx
+import s from './Button.module.css';
+<button className={s.primary} />
+```
+
+Class `primary` thành `Button_primary__a1b2c` — không bao giờ collide,
+và unused module = unused chunk = tự động bị tree-shake nếu không
+import.
+
+#### c. Coverage tab — biện pháp cuối
+
+Mở DevTools → `Cmd+Shift+P` → "Show Coverage" → reload → xem % CSS
+unused **theo từng URL pattern** thực tế:
+
+```text
+URL                          Total    Unused    Usage
+─────────────────────────────────────────────────────
+/styles/main.css            120 KB   78 KB    35%
+/styles/legacy-modal.css     34 KB   34 KB     0%   ← xoá!
+```
+
+### Modular split theo route
+
+Đừng ship 1 CSS file duy nhất cho cả site. Chia theo:
+
+- **Critical** (mọi page): reset, font, layout shell.
+- **Per-route**: chỉ load khi vào page đó.
+- **Per-component**: chỉ load khi component render (lazy).
+
+Astro, Next.js, SvelteKit đều tự động code-split CSS theo component
+import — bạn không cần làm gì ngoài việc **import CSS trực tiếp trong
+component** thay vì gom hết vào 1 entry.
+
+---
+
+## 5. Selector performance — không phải mọi selector đều bằng nhau
+
+Browser match selector theo thứ tự **right-to-left**. Hiểu điều này
+là chìa khoá:
+
+```css
+/* selector này được đọc là: */
+.sidebar ul li a span {
+  color: red;
+}
+/*
+ 1. tìm mọi <span>
+ 2. trong số đó, span nào có cha <a>?
+ 3. trong số đó, <a> nào có cha <li>?
+ 4. ... <li> nào có cha <ul>?
+ 5. ... <ul> nào có ancestor .sidebar?
+*/
+```
+
+Càng nhiều bước backtrack qua DOM tree, càng tốn CPU. Trên trang có
+10k+ DOM node, selector tệ có thể tốn **10-50ms** chỉ để style
+recalculation.
+
+### Phân loại theo chi phí
+
+| Selector type        | Ví dụ                  | Chi phí | Ghi chú                       |
+| -------------------- | ---------------------- | ------- | ----------------------------- |
+| ID                   | `#header`              | Rẻ nhất | Hash lookup O(1)              |
+| Class                | `.btn`                 | Rẻ      | Hash lookup O(1)              |
+| Tag                  | `div`                  | Trung bình | Browser optimize tốt        |
+| Attribute            | `[data-active="true"]` | Trung bình | Cần so chuỗi              |
+| Universal            | `*`                    | Đắt    | Match mọi element             |
+| Descendant           | `.a .b`                | Đắt    | Backtrack tree                |
+| `:has()`             | `.card:has(img)`       | Đắt    | Modern, nhưng phải reflow      |
+| `:nth-child(n)`      | `li:nth-child(odd)`    | Đắt    | Tính lại khi sibling đổi       |
+
+### Quy tắc thực dụng
+
+```css
+/* ❌ Universal + descendant + tag — match cả document */
+* {
+  box-sizing: border-box;
+}
+body div div ul li a {
+  color: blue;
+}
+
+/* ✅ Class trực tiếp */
+*,
+*::before,
+*::after {
+  box-sizing: border-box; /* universal nhưng OK vì chạy 1 lần */
+}
+.nav-link {
+  color: blue;
+}
+```
+
+> **Không bị lừa bởi micro-bench**: trên trang nhỏ thì không khác mấy.
+> Nhưng trên design system render hàng nghìn component (table, list
+> ảo hoá, dashboard), **flat selector + class duy nhất** giảm style
+> recalc 5-10x.
+
+### `:has()` — đẹp nhưng đắt
+
+```css
+/* Match mọi .card có chứa <img> bên trong */
+.card:has(img) {
+  padding: 0;
+}
+```
+
+`:has()` rất mạnh nhưng buộc browser phải **invalidate ngược lên cây**
+khi node con thay đổi. Dùng cho trường hợp thực sự cần — đừng abuse
+thay cho class.
+
+---
+
+## 6. Cost model: Layout, Paint, Composite
+
+Mỗi CSS property thuộc 1 trong 3 nhóm chi phí. Đây là **bảng tham
+chiếu nhanh** mà mọi frontend engineer nên thuộc nằm lòng:
+
+| Property                            | Layout | Paint | Composite | Note                          |
+| ----------------------------------- | ------ | ----- | --------- | ----------------------------- |
+| `width`, `height`                   | ✓      | ✓     | ✓         | Trigger toàn bộ pipeline       |
+| `top`, `left`, `margin`, `padding`  | ✓      | ✓     | ✓         | Reflow → repaint → recomposite |
+| `display`, `position`               | ✓      | ✓     | ✓         | Đặc biệt nặng                 |
+| `font-size`, `font-family`          | ✓      | ✓     | ✓         | Reflow toàn bộ text container |
+| `color`, `background-color`         |        | ✓     | ✓         | Repaint thôi                   |
+| `border-color`, `box-shadow`        |        | ✓     | ✓         | Repaint                        |
+| `visibility`                        |        | ✓     | ✓         | Repaint, KHÔNG layout         |
+| `transform` (translate/scale/rotate)|        |       | ✓         | **Chỉ composite — rẻ nhất**   |
+| `opacity`                           |        |       | ✓         | **Chỉ composite — rẻ nhất**   |
+| `filter` (nếu promoted layer)       |        |       | ✓         | Composite                     |
+
+Reference đầy đủ: [csstriggers.com](https://csstriggers.com/) (deprecated
+nhưng vẫn chính xác).
+
+### Ví dụ thực tế: animation menu trượt
+
+```css
+/* ❌ Trigger Layout mỗi frame — 60 lần/giây */
+.menu {
+  left: -300px;
+  transition: left 0.3s ease;
+}
+.menu.open {
+  left: 0;
+}
+
+/* ✅ Chỉ Composite — chạy trên GPU, main thread free */
+.menu {
+  transform: translateX(-300px);
+  transition: transform 0.3s ease;
+  will-change: transform;
+}
+.menu.open {
+  transform: translateX(0);
+}
+```
+
+Khác biệt trên thiết bị tầm trung: **20-30fps → smooth 60fps**.
+
+### Forced synchronous layout (layout thrashing)
+
+Đôi khi không phải CSS gây layout, mà JS đọc geometry **giữa lúc DOM
+đang dirty**:
+
+```ts
+// ❌ thrashing: read → write → read → write
+for (const el of elements) {
+  const w = el.offsetWidth;        // FORCE LAYOUT
+  el.style.width = w * 2 + 'px';   // dirty
+  const h = el.offsetHeight;       // FORCE LAYOUT lại từ đầu
+}
+
+// ✅ batch: read hết → write hết
+const widths = elements.map((el) => el.offsetWidth); // 1 layout
+elements.forEach((el, i) => {
+  el.style.width = widths[i] * 2 + 'px';
+});
+```
+
+Dấu hiệu trong DevTools Performance: tím "Recalculate Style" + đỏ
+"Layout" liên tiếp trong cùng 1 task = thrashing.
+
+---
+
+## 7. CSS Containment — cô lập subtree
+
+`contain` báo cho browser: "subtree này độc lập với phần còn lại của
+trang — đừng tính lại bên ngoài khi tôi đổi". Đây là một trong những
+property bị underused nhất.
+
+```css
+.card {
+  contain: layout paint;
+}
+```
+
+| Giá trị     | Ý nghĩa                                                         |
+| ----------- | --------------------------------------------------------------- |
+| `layout`    | Layout của element này không ảnh hưởng bên ngoài (và ngược lại) |
+| `paint`     | Browser có thể clip, không vẽ overflow ra ngoài                 |
+| `size`      | Element có size cố định không phụ thuộc con — cần `width/height` |
+| `style`     | Counter, quotes scoped trong subtree                            |
+| `content`   | Shorthand = `layout` + `paint` + `style`                        |
+| `strict`    | Tất cả                                                          |
+
+### Khi nào dùng
+
+- **List/feed item**: `contain: content` cho mỗi card.
+- **Modal/popover**: `contain: layout paint` — đảm bảo không reflow
+  trang khi modal nội dung đổi.
+- **Widget độc lập** (chat box, ad slot, embed): `contain: strict`
+  với explicit size.
+
+```css
+.feed-item {
+  contain: content; /* layout + paint + style */
+}
+
+.ad-slot {
+  contain: strict;
+  width: 300px;
+  height: 250px;
+}
+```
+
+Impact đo được trên feed dài 1000 item: style recalc giảm 60-80%.
+
+---
+
+## 8. `content-visibility` — bỏ qua off-screen
+
+Đây là **cú đổi đời** cho trang dài (blog, docs, landing page nhiều
+section). Thay vì browser layout & paint mọi section dù user chưa
+scroll tới, ta nói: "skip rendering nếu nó off-screen":
+
+```css
+.section {
+  content-visibility: auto;
+  contain-intrinsic-size: 0 800px; /* ước lượng size để tránh CLS */
+}
+```
+
+- `content-visibility: auto` — browser tự skip section ngoài viewport,
+  render khi scroll gần tới.
+- `contain-intrinsic-size` — placeholder size khi chưa render, giữ
+  scrollbar không nhảy.
+
+### Hiệu quả thực tế
+
+Theo demo của Chrome team trên trang HTML 8000 từ:
+
+| Metric                | Không có | `content-visibility: auto` |
+| --------------------- | -------- | -------------------------- |
+| Initial render time   | 232ms    | 30ms (-87%)                |
+| FCP                   | chậm     | nhanh ngay                 |
+| Memory                | toàn trang | chỉ phần visible        |
+
+### Pitfalls
+
+- **Search trong page** (`Cmd+F`) vẫn tìm được nội dung off-screen
+  (Chrome đã handle), nhưng screen reader có thể không index — test kỹ
+  với accessibility.
+- **Anchor link** (`#section-3`): Chrome auto-render khi scroll target
+  → OK.
+- Đừng bọc **toàn bộ `<main>`** — bọc theo từng section/card.
+
+---
+
+## 9. `will-change` & GPU acceleration đúng cách
+
+`will-change` báo browser: "tôi sắp animate thuộc tính này, hãy promote
+element thành layer riêng để dùng GPU".
+
+```css
+.card-hover {
+  will-change: transform, opacity;
+}
+```
+
+### Quy tắc dùng `will-change`
+
+1. **Chỉ dùng khi animation thật sự sắp xảy ra**. Set vĩnh viễn lên
+   100 element = 100 layer GPU = ăn RAM video, có thể chậm hơn không
+   set.
+2. **Add trước, remove sau khi xong**:
+
+   ```ts
+   el.style.willChange = 'transform';
+   el.classList.add('animate');
+   el.addEventListener('transitionend', () => {
+     el.style.willChange = 'auto';
+   }, { once: true });
+   ```
+
+3. **Không cần `will-change` cho animation đã chạy `transform`/`opacity`**
+   thường xuyên — browser tự promote sau frame thứ 2.
+
+### Anti-pattern: `translateZ(0)` hack
+
+```css
+/* ❌ hack cũ thời 2014 — đừng dùng */
+.box { transform: translateZ(0); }
+```
+
+Trước khi `will-change` tồn tại, dev hack `translateZ(0)` để force
+GPU layer. Modern browser đã coi đây là tín hiệu tương tự, nhưng
+`will-change` rõ ràng hơn và optimize tốt hơn. Đừng giữ legacy hack.
+
+### Layer explosion
+
+Mỗi GPU layer ngốn RAM video xấp xỉ `width × height × 4 bytes`. Một
+card 300×400 = 480KB. 50 card promoted = 24MB. Trên thiết bị mobile,
+**layer explosion** đẩy compositing xuống CPU và làm chậm hơn cả không
+promote.
+
+DevTools → 3-dot menu → More tools → **Layers** — xem mọi layer hiện
+có và memory tốn.
+
+---
+
+## 10. Animation performance — chỉ chạy `transform` và `opacity`
+
+Tổng kết từ phần 6: chỉ 2 property animate được trên compositor mà
+**không** đụng main thread:
+
+- `transform` (translate, scale, rotate, skew)
+- `opacity`
+
+Mọi thứ khác — `width`, `height`, `top`, `left`, `margin`, `color`,
+`background` — đều phải đi qua main thread, trùng với JS execution,
+và sẽ giật khi main thread bận.
+
+### Pattern thay thế thường gặp
+
+| Mục đích              | Cách tệ                  | Cách tốt                                       |
+| --------------------- | ------------------------ | ---------------------------------------------- |
+| Slide xuất hiện       | `top: 0` ↔ `top: -100px` | `transform: translateY(0)` ↔ `translateY(-100%)` |
+| Resize hover          | `width: 200px` ↔ `300px` | `transform: scale(1)` ↔ `scale(1.5)`           |
+| Fade                  | `display: none` toggle   | `opacity: 0` + `visibility: hidden`            |
+| Reveal khi scroll     | đổi `height: 0`          | `transform: scaleY(0)` + `transform-origin`    |
+| Background colour     | `background-color`       | overlay div + `opacity` (nếu cần animate)      |
+
+### `@media (prefers-reduced-motion)`
+
+Tôn trọng user — animation **không phải feature bắt buộc**:
+
+```css
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+```
+
+Thêm tag này vào reset CSS — vừa accessibility, vừa giảm tải perf
+cho thiết bị thấp.
+
+### Animation API thay vì JS interval
+
+```ts
+// ❌ trigger Layout mỗi frame
+let x = 0;
+setInterval(() => {
+  x += 1;
+  el.style.left = x + 'px';
+}, 16);
+
+// ✅ Chỉ Composite, browser optimize
+el.animate(
+  [{ transform: 'translateX(0)' }, { transform: 'translateX(300px)' }],
+  { duration: 1000, easing: 'ease-out' }
+);
+```
+
+Web Animations API chạy off-main-thread khi animate `transform`/`opacity`,
+y như CSS keyframes.
+
+---
+
+## 11. Modern CSS — Grid, Flexbox, container queries
+
+### Layout: Grid > absolute positioning
+
+Trước CSS Grid, dev dùng `position: absolute` + tính toán JS để layout
+lưới phức tạp. Mỗi lần resize → JS chạy → layout thrash.
+
+CSS Grid đẩy mọi tính toán xuống browser layout engine — viết bằng C++,
+nhanh hơn JS hàng chục lần và không block main thread:
+
+```css
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1rem;
+}
+```
+
+Một dòng thay thế 50 dòng JS resize observer.
+
+### Container queries — bỏ media query JS
+
+Component-driven design cần biết kích thước **của container chứa nó**,
+không phải viewport. Trước đây phải dùng `ResizeObserver` + JS toggle
+class. Bây giờ:
+
+```css
+.card-wrapper {
+  container-type: inline-size;
+}
+
+@container (min-width: 400px) {
+  .card {
+    flex-direction: row;
+  }
+}
+```
+
+Browser tự handle, không cần JS, không trigger layout extra. Hỗ trợ
+từ 2023, baseline modern.
+
+### `aspect-ratio` — bỏ padding-bottom hack
+
+```css
+/* ❌ hack cũ */
+.video-wrapper {
+  position: relative;
+  padding-bottom: 56.25%;
+}
+
+/* ✅ modern */
+.video {
+  aspect-ratio: 16 / 9;
+}
+```
+
+Đặc biệt quan trọng cho **CLS**: image/video có `aspect-ratio` reserve
+slot từ first paint.
+
+### `clamp()` — fluid typography, 1 dòng
+
+```css
+h1 {
+  font-size: clamp(1.5rem, 4vw, 3rem);
+}
+```
+
+Giữ heading scale theo viewport mà **không cần media query** → CSS
+ngắn hơn, ít rule hơn, parser nhanh hơn.
+
+---
+
+## 12. Architecture — Tailwind/atomic vs CSS-in-JS
+
+CSS architecture không phải "perf concern", **trừ khi** chúng ta tính
+chi phí bytes & runtime overhead.
+
+### Tailwind / Atomic CSS
+
+Pros perf:
+- **Bytes scale logarit**: 100 component dùng cùng `flex items-center`
+  vẫn chỉ ship class đó 1 lần.
+- **Tree-shake mặc định**: chỉ ship class đã dùng.
+- **0 runtime cost**: là CSS thuần.
+
+Cons:
+- HTML phình to: `class="flex items-center gap-2 px-4 py-2 ..."`. Nén
+  brotli sẽ giảm đáng kể (compression dictionary trùng lặp), nhưng
+  vẫn lớn hơn 1 class semantic.
+
+Verdict: **mặc định thắng** cho hầu hết app, đặc biệt khi đi với SSR
++ brotli.
+
+### CSS Modules
+
+Pros: scoped, không collide, code-split tự động theo component.
+Cons: viết nhiều CSS hơn Tailwind cho cùng UI.
+
+Verdict: **lựa chọn an toàn** khi team có designer/CSS expert riêng.
+
+### CSS-in-JS runtime (styled-components, emotion runtime)
+
+Pros: dynamic theme, prop-based style, co-locate.
+Cons perf:
+- **Runtime cost**: parse template string, hash, inject `<style>` tag,
+  re-render tốn 5-15% main thread JS.
+- **Defeat HTTP cache**: CSS sinh runtime → không cacheable cross-page.
+- **Hydration overhead**: SSR phải serialize cả CSS context.
+
+Verdict: **tránh trong app perf-critical**. Nếu cần JS-driven style,
+chuyển sang **zero-runtime CSS-in-JS**:
+
+- [vanilla-extract](https://vanilla-extract.style/) — TypeScript-first,
+  build-time extract.
+- [Linaria](https://linaria.dev/) — extract template → CSS file.
+- [Panda CSS](https://panda-css.com/) — atomic + type-safe.
+- Next.js App Router CSS modules / Tailwind.
+
+### So sánh nhanh
+
+| Approach              | Bundle size      | Runtime cost | Cache friendly | Type safe |
+| --------------------- | ---------------- | ------------ | -------------- | --------- |
+| Plain CSS / SCSS      | Phụ thuộc tác giả | 0           | ✓              | ✗         |
+| CSS Modules           | Nhỏ (per-component) | 0          | ✓              | + tooling |
+| Tailwind              | Nhỏ nhất ở scale | 0            | ✓              | + plugin  |
+| vanilla-extract       | Nhỏ             | 0            | ✓              | ✓         |
+| styled-components SSR | Trung bình       | 5-15% JS     | ✗ runtime      | ✓         |
+
+---
+
+## 13. Đo lường — DevTools, Lighthouse, RUM
+
+Đừng optimize mù. Mỗi thay đổi phải có số trước-sau.
+
+### Chrome DevTools — Performance tab
+
+1. Open DevTools → Performance → Record 3-5s thao tác chậm.
+2. Xem bảng phân tích thời gian:
+
+```text
+ Scripting:    1240 ms      ← JS
+ Rendering:     520 ms      ← Style + Layout       ◄─── CSS đây
+ Painting:      180 ms      ← Paint + Composite    ◄─── CSS đây
+ System:         60 ms
+ Idle:          100 ms
+```
+
+3. Tìm task dài > 50ms (Long Task) → click vào → xem từng frame.
+4. Tab **Layers** → kiểm tra số layer GPU và memory.
+
+### Lighthouse / PageSpeed
+
+Audit cụ thể về CSS:
+
+- *"Reduce unused CSS"* → có dead code.
+- *"Eliminate render-blocking resources"* → critical CSS chưa inline.
+- *"Avoid non-composited animations"* → animate property đụng layout.
+- *"Avoid large layout shifts"* → CLS, thiếu `aspect-ratio` hoặc
+  reserved size.
+
+### Real User Monitoring (RUM)
+
+Lab tốt nhưng không bằng prod data. Theo dõi liên tục:
+
+- **CLS** — `LayoutShift` Performance Observer.
+- **Long Animation Frames** (LoAF) — API mới, replace LongTask, đo
+  cụ thể frame nào jank.
+- **INP** (Interaction to Next Paint) — vào Web Vitals tháng 3/2024,
+  CSS phức tạp ảnh hưởng trực tiếp.
+
+```ts
+new PerformanceObserver((list) => {
+  for (const entry of list.getEntries()) {
+    if (entry.duration > 50) {
+      console.warn('Long animation frame', entry);
+    }
+  }
+}).observe({ type: 'long-animation-frame', buffered: true });
+```
+
+### `Performance.measure()` — đo chỗ bạn nghi ngờ
+
+```ts
+performance.mark('render-start');
+// ... render
+performance.mark('render-end');
+performance.measure('render', 'render-start', 'render-end');
+```
+
+Hiện ngay trong Performance tab, có user timing track riêng.
+
+---
+
+## 14. Checklist
+
+Áp dụng theo thứ tự — đa số site chỉ cần 5-7 mục đầu là perf rất tốt:
+
+### Bắt buộc
+
+- [ ] CSS được minify trong production
+- [ ] Critical CSS inline cho above-the-fold
+- [ ] Loại CSS không dùng (PurgeCSS / Tailwind JIT / CSS Modules)
+- [ ] Code-split CSS theo route, không 1 file global khổng lồ
+- [ ] Animation chỉ dùng `transform` & `opacity`
+- [ ] `aspect-ratio` cho mọi image/video → CLS = 0
+
+### Nên có
+
+- [ ] `content-visibility: auto` cho section dài off-screen
+- [ ] `contain: content` cho list/feed item
+- [ ] Selector flat, ưu tiên class đơn — không `.a .b .c .d span`
+- [ ] Bỏ `@import` trong CSS, dùng nhiều `<link>` song song
+- [ ] `media="print"` + `onload` cho non-critical CSS
+- [ ] Thay CSS-in-JS runtime bằng zero-runtime (vanilla-extract, Linaria)
+
+### Polish
+
+- [ ] `will-change` chỉ dùng khi sắp animate, remove sau
+- [ ] `@media (prefers-reduced-motion)` reset
+- [ ] Container queries thay cho ResizeObserver
+- [ ] Web Animations API thay cho `setInterval` animation
+- [ ] Theo dõi RUM với INP & LoAF
+
+---
+
+## Tóm tắt
+
+| Kỹ thuật                         | Effort  | Impact                | Ưu tiên |
+| -------------------------------- | ------- | --------------------- | ------- |
+| Minify + dead code elimination   | 30 phút | Cao (bytes)           | 1       |
+| Critical CSS inline              | 1-2h    | Cao (FCP/LCP)         | 2       |
+| Animation đúng property          | 30 phút | Cao (frame rate)      | 3       |
+| `aspect-ratio` cho media         | 15 phút | Cao (CLS)             | 4       |
+| `content-visibility: auto`       | 30 phút | Cực cao (initial render) | 5    |
+| Containment (`contain: content`) | 30 phút | Trung bình-Cao (scroll) | 6     |
+| Selector cleanup                 | 1-2h    | Trung bình (lớn site) | 7       |
+| Đổi sang zero-runtime CSS-in-JS  | 1-2 ngày | Cao (JS execution)   | 8       |
+| `will-change` chính xác          | tuỳ scope | Trung bình          | 9       |
+
+> **Không có viên đạn bạc duy nhất.** Nhưng 4-5 mục đầu — minify,
+> critical CSS, animation đúng cách, `aspect-ratio`, `content-visibility`
+> — giải quyết ~80% vấn đề CSS perf cho hầu hết site. Phần còn lại là
+> cuộc đua chậm rãi vào tháng/quý cải thiện liên tục, đo bằng RUM
+> thật trên user thật.
+
+CSS perf không phải chuyện viết "less CSS" — mà là **viết CSS browser
+xử lý rẻ**. Hiểu pipeline, biết property nào đụng stage nào, và đo
+đạc trước khi tối ưu — đó là toàn bộ công thức.
+
+---
+
+## Nguồn tham khảo
+
+- [web.dev — Rendering performance](https://web.dev/articles/rendering-performance)
+- [web.dev — `content-visibility`](https://web.dev/articles/content-visibility)
+- [web.dev — CSS containment](https://web.dev/articles/css-containment)
+- [web.dev — Optimize INP](https://web.dev/articles/optimize-inp)
+- [MDN — `will-change`](https://developer.mozilla.org/en-US/docs/Web/CSS/will-change)
+- [MDN — Container queries](https://developer.mozilla.org/en-US/docs/Web/CSS/CSS_containment/Container_queries)
+- [CSS Triggers — bảng tham chiếu Layout/Paint/Composite](https://csstriggers.com/)
+- [HTTP Archive — Web Almanac CSS chapter](https://almanac.httparchive.org/en/2024/css)
+- [Critters — Critical CSS plugin](https://github.com/GoogleChromeLabs/critters)
+- [Addy Osmani — The Cost of JavaScript & CSS](https://web.dev/articles/the-cost-of-javascript-2019)

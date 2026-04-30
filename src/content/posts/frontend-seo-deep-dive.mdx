@@ -1,0 +1,1411 @@
+---
+title: 'SEO ở frontend — deep dive từ robots.txt tới prerender React SPA'
+description: 'Toàn cảnh SEO cho frontend engineer: cách Googlebot crawl & render 2-wave, robots.txt và sitemap, meta/OG/JSON-LD, canonical & hreflang, Web Vitals, spectrum CSR/SSR/SSG/ISR, vì sao SPA React dễ tàng hình và prerender giải quyết ra sao.'
+pubDate: 2026-04-30
+tags: [seo, frontend, react, performance, web-vitals]
+draft: false
+---
+
+SEO thường bị coi là việc của **marketer** hay **content writer** — frontend
+engineer chỉ cần "đặt cái title vào `<head>` là xong". Nhưng trong thực
+tế production, SEO bị break ở những chỗ rất frontend: một thẻ `<a>` được
+thay bằng `<div onClick>`, một route `/products/:id` chỉ tồn tại sau khi
+JS chạy, một `noindex` lén lút từ environment staging trượt lên production,
+một CLS cao đẩy trang ra khỏi top 10. Và mọi thứ đó đều không hiện ra
+trong DevTools — chỉ hiện trong Search Console 2 tuần sau khi traffic đã
+rớt 40%.
+
+Bài này đi từ **cách search engine thực sự nhìn website của bạn** —
+crawl, render, index — xuống cụ thể từng config (`robots.txt`,
+`sitemap.xml`, meta, JSON-LD, canonical, hreflang), rồi đến **bài toán
+khó nhất của frontend hiện đại**: SPA React và làm thế nào prerender /
+SSR / SSG giải quyết nó. Mục tiêu là sau khi đọc xong, bạn có một
+**mental model** đủ chắc để đứng review PR và nói được "chỗ này sẽ break
+SEO vì..." chứ không phải "thêm cái meta tag là được".
+
+---
+
+## Mục lục
+
+1. [Search engine làm gì với website của bạn — crawl/render/index/rank](#1-search-engine-làm-gì-với-website-của-bạn--crawlrenderindexrank)
+2. [Googlebot 2-wave rendering — vì sao SPA dễ tàng hình](#2-googlebot-2-wave-rendering--vì-sao-spa-dễ-tàng-hình)
+3. [`robots.txt` — gatekeeper layer](#3-robotstxt--gatekeeper-layer)
+4. [`sitemap.xml` — bản đồ cho crawler](#4-sitemapxml--bản-đồ-cho-crawler)
+5. [Meta tags & semantic HTML — nền móng on-page](#5-meta-tags--semantic-html--nền-móng-on-page)
+6. [Open Graph & Twitter Cards — preview khi share](#6-open-graph--twitter-cards--preview-khi-share)
+7. [Structured data (JSON-LD) — rich result & knowledge graph](#7-structured-data-json-ld--rich-result--knowledge-graph)
+8. [Canonical URL — chống duplicate content](#8-canonical-url--chống-duplicate-content)
+9. [URL structure, redirects, status code](#9-url-structure-redirects-status-code)
+10. [Hreflang & SEO đa ngôn ngữ](#10-hreflang--seo-đa-ngôn-ngữ)
+11. [Core Web Vitals — performance là ranking factor](#11-core-web-vitals--performance-là-ranking-factor)
+12. [Spectrum rendering: CSR ↔ SSR ↔ SSG ↔ ISR ↔ Streaming](#12-spectrum-rendering-csr--ssr--ssg--isr--streaming)
+13. [SPA & SEO — vì sao React vanilla "tàng hình" với crawler](#13-spa--seo--vì-sao-react-vanilla-tàng-hình-với-crawler)
+14. [Prerender — build-time, runtime, dynamic rendering](#14-prerender--build-time-runtime-dynamic-rendering)
+15. [React-specific: Next.js / Remix / Astro / react-helmet-async](#15-react-specific-nextjs--remix--astro--react-helmet-async)
+16. [Đo lường — Search Console, Lighthouse, URL Inspection](#16-đo-lường--search-console-lighthouse-url-inspection)
+17. [Pitfalls thường gặp trong production](#17-pitfalls-thường-gặp-trong-production)
+18. [Checklist trước khi launch](#18-checklist-trước-khi-launch)
+
+---
+
+## 1. Search engine làm gì với website của bạn — crawl/render/index/rank
+
+Trước khi tối ưu bất cứ thứ gì, phải tách rời 4 giai đoạn — vì mỗi giai
+đoạn có cách break riêng và cách fix riêng:
+
+```text
+   ┌────────┐    ┌────────┐    ┌─────────┐    ┌────────┐
+   │ CRAWL  │ ─► │ RENDER │ ─► │  INDEX  │ ─► │  RANK  │
+   └────────┘    └────────┘    └─────────┘    └────────┘
+   bot fetch     chạy JS,      lưu vào         xếp hạng
+   HTML/asset    build DOM     search index    với query
+   theo link     cuối cùng     (text + meta)   (200+ signals)
+       ▲             ▲              ▲              ▲
+       │             │              │              │
+   robots.txt    rendering        canonical     content +
+   sitemap       strategy         duplicate     UX +
+   internal      (CSR/SSR…)       structured    Web Vitals
+   linking                        data          + backlinks
+```
+
+| Giai đoạn  | Bot làm gì                                       | Frontend kiểm soát qua             |
+| ---------- | ------------------------------------------------ | ---------------------------------- |
+| **Crawl**  | Fetch URL theo link, theo sitemap                | `robots.txt`, sitemap, internal link, `<a href>` |
+| **Render** | Chạy JS để dựng DOM "final"                      | rendering strategy, payload size, JS error |
+| **Index**  | Phân tích nội dung, lưu vào index                | meta tags, semantic HTML, canonical, JSON-LD |
+| **Rank**   | Match với query + áp 200+ signals                | content quality, Web Vitals, backlinks, E-E-A-T |
+
+> Một sai lầm phổ biến: nghĩ "Google cứ thấy thì index". Không. Google
+> phải **crawl được**, **render được**, **index được**, *rồi mới rank*.
+> Mất ở bất cứ tầng nào → page biến mất khỏi kết quả.
+
+Bài này tập trung vào 3 tầng đầu — đó là phần frontend trực tiếp control.
+
+---
+
+## 2. Googlebot 2-wave rendering — vì sao SPA dễ tàng hình
+
+Googlebot không render trang ngay sau khi fetch HTML. Nó chia làm 2
+"wave":
+
+```text
+ ┌─────────────────────────────┐         ┌──────────────────────────────┐
+ │ WAVE 1 — Crawl HTML thô     │         │ WAVE 2 — Render với headless │
+ │                             │         │ Chrome (Web Rendering Service│
+ │ • Fetch HTML response       │  qu  ─► │  / WRS)                      │
+ │ • Parse <a href>, <link>    │  eu     │                              │
+ │ • Đẩy URL mới vào queue     │  e      │ • Chạy JS, đợi network idle  │
+ │ • INDEX gì có trong HTML    │         │ • Snapshot DOM cuối cùng     │
+ │ • Đẩy URL vào render queue  │         │ • RE-INDEX với DOM mới       │
+ └─────────────────────────────┘         └──────────────────────────────┘
+       (vài giây)                              (vài giờ → vài ngày)
+```
+
+**Hệ quả thực tế:**
+
+- Mọi thứ chỉ tồn tại sau khi JS chạy → bị index **chậm**, đôi khi **bỏ qua**.
+- Internal link `<a href>` quan trọng phải có **trong HTML wave 1** —
+  nếu chỉ render bằng JS sau, crawler không thấy → không discovery URL mới.
+- Meta `title`, `description`, canonical viết bằng JS sẽ phải đợi wave 2
+  → trong khoảng đó Google index bằng giá trị mặc định (thường là rỗng
+  hoặc generic).
+- **Bing, DuckDuckGo, Baidu, Yandex** — render JS yếu hoặc không render.
+  Nếu bạn cần traffic từ những engine này, SPA thuần là vô vọng.
+
+```text
+SPA-only timeline (xấu)            SSR/SSG timeline (tốt)
+────────────────────────           ─────────────────────
+HTML fetch ─► <div id="root"/>     HTML fetch ─► full content + <a>
+                <script ...>                       │
+                ▼                                  ▼
+              wave 1: empty index               wave 1: rich index ✓
+                ▼                                  ▼
+              (vài ngày sau)                    JS hydrate ─► interactive
+                ▼
+              wave 2 render
+                ▼
+              re-index with content
+```
+
+Đây là toàn bộ lý do bài này tồn tại: **SPA mặc định bất lợi cho SEO**,
+và phần lớn bài viết là về cách kéo trang về đúng phía bên phải sơ đồ.
+
+---
+
+## 3. `robots.txt` — gatekeeper layer
+
+`robots.txt` là **file text đặt ở root** của domain (`/robots.txt`) nói
+với crawler được/không được crawl gì. Nó không phải security layer (vẫn
+public, attacker đọc được). Nó **không** chặn URL khỏi index nếu có
+backlink trỏ tới — chỉ chặn **crawl**.
+
+### Cú pháp tối thiểu
+
+```text
+# Áp dụng cho mọi user-agent
+User-agent: *
+Allow: /
+Disallow: /admin/
+Disallow: /api/
+Disallow: /*.json$       # block mọi URL kết thúc .json
+Disallow: /search?       # block mọi URL bắt đầu /search?
+
+# Rule riêng cho 1 bot
+User-agent: GPTBot
+Disallow: /
+
+# Sitemap (gợi ý vị trí cho crawler)
+Sitemap: https://example.com/sitemap-index.xml
+```
+
+| Directive    | Ý nghĩa                                   | Hỗ trợ              |
+| ------------ | ----------------------------------------- | ------------------- |
+| `User-agent` | Bot nào áp rule sau                       | ✓ chuẩn             |
+| `Disallow`   | Path không được crawl                     | ✓ chuẩn             |
+| `Allow`      | Override `Disallow` cho subpath           | ✓ chuẩn (Google/Bing) |
+| `Sitemap`    | URL tuyệt đối tới sitemap                 | ✓ chuẩn             |
+| `Crawl-delay`| Giây giữa các request                     | ✓ Bing/Yandex, ✗ Google |
+| `Host`       | Canonical host                            | Yandex only — bỏ qua |
+
+### Pattern matching
+
+- `*` match bất kỳ chuỗi nào.
+- `$` neo cuối URL.
+- Không phải regex đầy đủ — chỉ wildcard cơ bản.
+
+### `robots.txt` không phải `noindex`
+
+Đây là pitfall to nhất:
+
+```text
+robots.txt: Disallow: /private/page
+
+→ Googlebot KHÔNG crawl page
+→ NHƯNG nếu có backlink trỏ tới → URL VẪN xuất hiện trong index
+   (chỉ là không có title/description vì không crawl được)
+```
+
+Muốn page **không nằm trong index**, dùng `<meta name="robots" content="noindex">`
+trong HTML, hoặc HTTP header `X-Robots-Tag: noindex`. Nhưng để Googlebot
+**đọc được** thẻ noindex, page phải **được phép crawl** — nghĩa là
+*không* `Disallow` trong `robots.txt`.
+
+> Hai directive đối nghịch nhau hơn ta nghĩ: `Disallow` chặn crawl, `noindex`
+> chặn index. Cần index → không Disallow → để Google đọc được noindex.
+
+### File site này
+
+```text
+User-agent: *
+Allow: /
+
+Sitemap: https://jvinhit.github.io/sitemap-index.xml
+```
+
+Đơn giản và đúng cho blog public: cho phép tất cả, chỉ ra sitemap. Nếu
+có khu vực `/admin`, `/api`, `/draft/` thì thêm `Disallow` riêng.
+
+### Block AI bot
+
+Hot topic 2024-2026 — nếu không muốn content bị scrape vào training
+data của LLM:
+
+```text
+User-agent: GPTBot          # OpenAI
+Disallow: /
+
+User-agent: Google-Extended # Gemini training
+Disallow: /
+
+User-agent: anthropic-ai    # Claude
+Disallow: /
+
+User-agent: ClaudeBot       # Claude crawl
+Disallow: /
+
+User-agent: CCBot           # Common Crawl (huấn luyện nhiều LLM)
+Disallow: /
+
+User-agent: PerplexityBot
+Disallow: /
+```
+
+> Lưu ý: block ở `robots.txt` chỉ hiệu lực với bot **tuân thủ tự nguyện**.
+> Crawler scraper không tử tế thì kệ. Nhưng các vendor lớn (OpenAI,
+> Anthropic, Google) đã cam kết tuân thủ.
+
+---
+
+## 4. `sitemap.xml` — bản đồ cho crawler
+
+Sitemap không **bắt buộc** — Google vẫn discovery URL qua link. Nhưng
+nó giúp:
+
+- Bot biết URL mới ngay (không phải đợi crawl link tới).
+- Hint `lastmod` — bot ưu tiên crawl page vừa update.
+- Khám phá các URL **không có internal link tới** (page mồ côi).
+
+### Format chuẩn
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://example.com/posts/seo-deep-dive</loc>
+    <lastmod>2026-04-30</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <!-- ... -->
+</urlset>
+```
+
+| Element       | Bắt buộc | Google dùng?                            |
+| ------------- | -------- | --------------------------------------- |
+| `<loc>`       | ✓        | ✓                                       |
+| `<lastmod>`   | ✗        | ✓ (rất quan trọng, dùng để priorit crawl) |
+| `<changefreq>`| ✗        | ✗ (Google bỏ qua)                       |
+| `<priority>`  | ✗        | ✗ (Google bỏ qua)                       |
+
+Tức là chỉ cần `loc` + `lastmod` chính xác là đủ. Đừng cố ý chỉnh
+`priority` cao mong rank cao — Google không đọc.
+
+### Sitemap index — khi sitemap quá lớn
+
+Mỗi sitemap giới hạn **50,000 URL** hoặc **50MB uncompressed**. Vượt
+ngưỡng → tách thành nhiều sitemap và link qua `sitemap-index.xml`:
+
+```xml
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <sitemap>
+    <loc>https://example.com/sitemap-posts.xml</loc>
+    <lastmod>2026-04-30</lastmod>
+  </sitemap>
+  <sitemap>
+    <loc>https://example.com/sitemap-products.xml</loc>
+    <lastmod>2026-04-30</lastmod>
+  </sitemap>
+</sitemapindex>
+```
+
+### Generate trong Astro / Next.js
+
+Astro có integration `@astrojs/sitemap` — auto detect mọi route static,
+respect `trailingSlash` config. Trong Next.js (App Router) dùng
+`app/sitemap.ts`:
+
+```ts
+// app/sitemap.ts (Next.js 14+)
+import type { MetadataRoute } from 'next';
+import { getAllPosts } from '@/lib/posts';
+
+export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
+  const posts = await getAllPosts();
+
+  const staticRoutes: MetadataRoute.Sitemap = [
+    { url: 'https://example.com', lastModified: new Date(), priority: 1 },
+    { url: 'https://example.com/blog', lastModified: new Date(), priority: 0.8 },
+  ];
+
+  const postRoutes = posts.map((p) => ({
+    url: `https://example.com/posts/${p.slug}`,
+    lastModified: p.updatedAt,
+    priority: 0.6,
+  }));
+
+  return [...staticRoutes, ...postRoutes];
+}
+```
+
+### Submit & verify
+
+- Add Sitemap URL vào `robots.txt` (như đã thấy ở mục 3).
+- Submit qua Google Search Console → "Sitemaps" → URL.
+- Submit qua Bing Webmaster Tools.
+- Theo dõi tỉ lệ "Discovered / Indexed" — nếu chênh lớn, có vấn đề ở
+  render / canonical / quality.
+
+---
+
+## 5. Meta tags & semantic HTML — nền móng on-page
+
+Đây là phần "ai cũng biết nhưng làm sai" nhiều nhất.
+
+### `<head>` tối thiểu
+
+```html
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <title>SEO ở frontend — deep dive | jvinhit</title>
+  <meta
+    name="description"
+    content="Toàn cảnh SEO cho frontend engineer..."
+  />
+
+  <link rel="canonical" href="https://example.com/posts/seo-deep-dive" />
+
+  <meta name="robots" content="index, follow, max-image-preview:large" />
+</head>
+```
+
+| Tag                         | Vai trò                                        | Hay sai                                |
+| --------------------------- | ---------------------------------------------- | -------------------------------------- |
+| `<title>`                   | Tiêu đề trên SERP, tab browser                 | Quá dài (>60 chars bị cắt), trùng nhau |
+| `<meta name="description">` | Snippet dưới title trong SERP                  | >160 chars bị cắt; copy-paste mọi page |
+| `<link rel="canonical">`    | URL "thật" của trang (chống duplicate)         | Trỏ sai domain (http vs https, www)    |
+| `<meta name="robots">`      | Index/follow flags                             | Để `noindex` lén từ staging sang prod  |
+| `<meta name="viewport">`    | Mobile responsive                              | Quên hẳn → mobile-first index xếp hạng tệ |
+
+### Robots meta directives
+
+```html
+<meta name="robots" content="index, follow" />
+<meta name="robots" content="noindex, nofollow" />
+<meta name="robots" content="noindex, follow, noarchive, nosnippet" />
+```
+
+| Directive            | Ý nghĩa                                              |
+| -------------------- | ---------------------------------------------------- |
+| `index` / `noindex`  | Cho phép / chặn lưu page vào index                   |
+| `follow` / `nofollow`| Theo / không theo các link trong page                |
+| `noarchive`          | Không cache page (không hiện link "Cached")          |
+| `nosnippet`          | Không hiện snippet description                       |
+| `max-image-preview:large` | Cho phép hiện preview ảnh lớn trong SERP        |
+| `max-snippet:-1`     | Không giới hạn độ dài snippet                        |
+
+### Semantic HTML — không phải chỉ cho a11y
+
+Crawler dùng semantic tag để hiểu cấu trúc page. Khác biệt giữa:
+
+```html
+<!-- ❌ Crawler không biết đâu là main, đâu là nav -->
+<div class="topbar">…</div>
+<div class="content">…</div>
+
+<!-- ✅ Crawler hiểu rõ -->
+<header><nav>…</nav></header>
+<main>
+  <article>
+    <h1>Tiêu đề bài</h1>
+    <p>…</p>
+  </article>
+</main>
+<footer>…</footer>
+```
+
+Quy tắc:
+
+- **1 và chỉ 1 `<h1>`** mỗi page (đa số CMS hỏng chỗ này).
+- Heading **theo thứ tự** — không skip `h2 → h4`.
+- `<a href>` cho navigation, không phải `<div onClick>` (crawler không
+  follow `onClick`).
+- `<main>` chứa nội dung chính, một và chỉ một per page.
+- Image phải có `alt` — crawler dùng để hiểu nội dung ảnh, hỗ trợ
+  Google Image Search.
+
+> **Test nhanh**: tắt CSS + JS (`view-source:` hoặc DevTools "Disable JavaScript")
+> → page có còn đọc hiểu được không? Nếu không, crawler cũng không hiểu.
+
+---
+
+## 6. Open Graph & Twitter Cards — preview khi share
+
+Không trực tiếp ảnh hưởng ranking, nhưng ảnh hưởng **CTR** (click-through
+rate) — và CTR là behavior signal Google quan sát.
+
+```html
+<!-- Open Graph (Facebook, LinkedIn, Slack, Discord, ...) -->
+<meta property="og:type" content="article" />
+<meta property="og:title" content="SEO ở frontend — deep dive" />
+<meta property="og:description" content="Toàn cảnh SEO..." />
+<meta property="og:url" content="https://example.com/posts/seo-deep-dive" />
+<meta property="og:image" content="https://example.com/og/seo.png" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta property="og:locale" content="vi_VN" />
+<meta property="og:site_name" content="jvinhit" />
+
+<!-- Twitter Card -->
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="SEO ở frontend — deep dive" />
+<meta name="twitter:description" content="Toàn cảnh SEO..." />
+<meta name="twitter:image" content="https://example.com/og/seo.png" />
+<meta name="twitter:site" content="@jvinhit" />
+```
+
+| Quy tắc                                               | Vì sao                                       |
+| ----------------------------------------------------- | -------------------------------------------- |
+| OG image **1200×630** (ratio 1.91:1)                  | Đẹp ở Facebook, LinkedIn, Slack              |
+| Tuyệt đối URL (không relative) cho `og:image`/`og:url`| Crawler social không resolve relative URL    |
+| Image < 8MB, format PNG / JPG                         | Một số scraper từ chối WebP/AVIF             |
+| Có `og:image:width` + `height`                        | Một vài scraper render ngay không cần fetch  |
+
+Tự động generate OG image cũng là pattern phổ biến (`@vercel/og`,
+satori, hay edge function của Cloudflare):
+
+```tsx
+// Next.js: app/api/og/route.tsx
+import { ImageResponse } from 'next/og';
+
+export const runtime = 'edge';
+
+export async function GET(req: Request) {
+  const { searchParams } = new URL(req.url);
+  const title = searchParams.get('title') ?? 'jvinhit blog';
+
+  return new ImageResponse(
+    (
+      <div
+        style={{
+          fontSize: 64,
+          background: '#0b0b0b',
+          color: '#fff',
+          width: '100%',
+          height: '100%',
+          padding: 80,
+          display: 'flex',
+          alignItems: 'center',
+        }}
+      >
+        {title}
+      </div>
+    ),
+    { width: 1200, height: 630 }
+  );
+}
+```
+
+Test bằng [opengraph.xyz](https://www.opengraph.xyz/) hoặc Facebook Sharing
+Debugger / LinkedIn Post Inspector / X Card Validator.
+
+---
+
+## 7. Structured data (JSON-LD) — rich result & knowledge graph
+
+Structured data là cách "kể cho Google" rằng page này là *bài viết*, có
+*tác giả*, được *xuất bản ngày X*, thuộc *category Y*. Khi Google hiểu,
+nó có thể hiện **rich result** (sao đánh giá, ảnh, breadcrumb, FAQ, …)
+trên SERP — tăng CTR đáng kể.
+
+3 format Google support: **JSON-LD** (khuyên dùng), Microdata, RDFa.
+JSON-LD tách biệt khỏi markup — dễ maintain hơn.
+
+### Article schema
+
+```html
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BlogPosting",
+  "headline": "SEO ở frontend — deep dive từ robots.txt tới prerender",
+  "description": "Toàn cảnh SEO cho frontend engineer...",
+  "image": "https://example.com/og/seo.png",
+  "datePublished": "2026-04-30",
+  "dateModified": "2026-04-30",
+  "author": {
+    "@type": "Person",
+    "name": "jvinhit",
+    "url": "https://jvinhit.github.io/about"
+  },
+  "publisher": {
+    "@type": "Organization",
+    "name": "jvinhit",
+    "logo": {
+      "@type": "ImageObject",
+      "url": "https://example.com/logo.png"
+    }
+  },
+  "mainEntityOfPage": {
+    "@type": "WebPage",
+    "@id": "https://example.com/posts/seo-deep-dive"
+  }
+}
+</script>
+```
+
+### Breadcrumb
+
+```html
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://example.com/" },
+    { "@type": "ListItem", "position": 2, "name": "Blog", "item": "https://example.com/blog" },
+    { "@type": "ListItem", "position": 3, "name": "SEO Deep Dive" }
+  ]
+}
+</script>
+```
+
+### Schema phổ biến đáng dùng
+
+| Schema           | Khi nào dùng                                    | Rich result                          |
+| ---------------- | ----------------------------------------------- | ------------------------------------ |
+| `Article` / `BlogPosting` | Bài blog, news                          | Top stories, headline                |
+| `BreadcrumbList` | Page có hierarchy                               | Breadcrumb thay URL trong SERP       |
+| `FAQPage`        | Page có Q&A list                                | Accordion FAQ ngay trong SERP        |
+| `HowTo`          | Tutorial step-by-step                           | Step list                            |
+| `Product`        | E-commerce                                      | Giá, rating, availability            |
+| `Recipe`         | Công thức nấu ăn                                | Ảnh + thời gian + rating             |
+| `Organization`   | Trang chủ company                               | Knowledge panel bên phải SERP        |
+| `Person`         | Trang author                                    | Knowledge panel cá nhân              |
+| `VideoObject`    | Page có video chính                             | Thumbnail + duration trong SERP      |
+| `SoftwareApplication` | App / library                              | Rating, screenshot                   |
+| `Event`          | Concert, conference                             | Date, location trong SERP            |
+
+### Helper sinh JSON-LD trong React
+
+```ts
+// src/lib/seo/structured-data.ts
+import type { CollectionEntry } from 'astro:content';
+
+interface ArticleSchema {
+  type: 'BlogPosting';
+  url: string;
+  title: string;
+  description: string;
+  image: string;
+  publishedAt: Date;
+  updatedAt?: Date;
+  authorName: string;
+  authorUrl: string;
+}
+
+export function articleJsonLd(input: ArticleSchema): string {
+  // Stringify để inject thẳng vào <script>; null/undefined sẽ bị Google bỏ qua
+  // nhưng trông xấu trong source view nên ta loại trước.
+  const data = {
+    '@context': 'https://schema.org',
+    '@type': input.type,
+    headline: input.title,
+    description: input.description,
+    image: input.image,
+    datePublished: input.publishedAt.toISOString(),
+    dateModified: (input.updatedAt ?? input.publishedAt).toISOString(),
+    author: {
+      '@type': 'Person',
+      name: input.authorName,
+      url: input.authorUrl,
+    },
+    mainEntityOfPage: { '@type': 'WebPage', '@id': input.url },
+  };
+  return JSON.stringify(data);
+}
+```
+
+Test bằng [Google Rich Results Test](https://search.google.com/test/rich-results)
+hoặc [Schema Markup Validator](https://validator.schema.org/).
+
+> Rule: chỉ markup những thứ **thật sự có trên page**. Markup giả →
+> **manual action** từ Google → drop ranking nặng nề.
+
+---
+
+## 8. Canonical URL — chống duplicate content
+
+Cùng một content có thể truy cập qua nhiều URL:
+
+```text
+https://example.com/post
+https://example.com/post/
+https://www.example.com/post
+http://example.com/post
+https://example.com/post?utm_source=twitter
+https://example.com/POST
+https://example.com/index.php?page=post
+```
+
+Google không phạt duplicate, nhưng nó phải **chọn một** để index. Nếu
+không hint, Google chọn — và nó có thể chọn sai (phiên bản có UTM, ngôn
+ngữ phụ, version cũ). `<link rel="canonical">` nói thẳng: "đây là URL
+thật, mọi URL khác chỉ là alias".
+
+```html
+<link rel="canonical" href="https://example.com/posts/seo-deep-dive" />
+```
+
+### Quy tắc
+
+- **Tuyệt đối URL** (kèm `https://example.com/`).
+- **Self-referencing canonical** trên mọi page — không hại, chống bị
+  scraper chiếm.
+- Nhất quán protocol (https), www / non-www, trailing slash.
+- Pagination: `?page=2` thường canonical về **chính nó**, không phải
+  page 1 — vì nội dung khác nhau.
+- Filter/sort URL (`?color=red`) thường canonical về URL gốc nếu coi
+  filter là "view khác của cùng content".
+
+### Khi nào canonical **không** đủ
+
+- Cross-domain: dùng `<link rel="canonical">` cross-domain Google
+  *thường* tôn trọng nhưng không đảm bảo. An toàn hơn → 301 redirect.
+- A/B test: dùng `<link rel="canonical">` của variant trỏ về original
+  để tránh split index.
+
+---
+
+## 9. URL structure, redirects, status code
+
+URL là một trong những signal SEO **bền nhất**: dễ chia sẻ, hiện trong
+SERP, ảnh hưởng CTR.
+
+### URL design
+
+```text
+✅ /posts/seo-deep-dive
+✅ /vi/blog/2026/seo-deep-dive
+✅ /products/leather-jacket-black
+
+❌ /post.php?id=472
+❌ /b/2026/04/30/x9k2lm
+❌ /Posts/SEO-Deep-Dive          (mixed case → duplicate risk)
+❌ /posts/seo_deep_dive          (underscore — Google đọc như 1 từ)
+❌ /posts/sêo-đêep-đive          (Vietnamese diacritics — trông xấu, copy/paste hỏng)
+```
+
+Quy tắc tối thiểu:
+
+- Hyphen `-`, không underscore.
+- Lowercase only (case-sensitive ở đa số server).
+- Slug có nghĩa, ngắn (3-5 từ).
+- Tránh tham số query khi có thể.
+- Trailing slash *nhất quán* — pick một và stick với nó.
+
+### Status code đúng
+
+| Code | Khi nào dùng                                               | SEO impact                              |
+| ---- | ---------------------------------------------------------- | --------------------------------------- |
+| 200  | Page tồn tại                                               | Index OK                                |
+| 301  | Permanent redirect (đổi URL vĩnh viễn)                     | Pass ranking signal sang URL mới        |
+| 302  | Temporary redirect                                         | KHÔNG pass signal — dùng cho promotion ngắn hạn |
+| 304  | Not Modified (response cache)                              | OK — bot dùng version cũ                |
+| 404  | Không tồn tại                                              | Bot remove khỏi index sau vài lần       |
+| 410  | Gone (đã xoá vĩnh viễn)                                    | Remove **nhanh hơn** 404                |
+| 5xx  | Server error                                               | Bot lùi crawl — kéo dài → drop index    |
+
+> Pitfall hot: SPA dùng `window.location.href = '/login'` thay cho redirect
+> → bot thấy 200 + content sai → index nhầm. Phải redirect ở **server
+> level** (Edge function, middleware, host config).
+
+### Soft 404
+
+Page trả 200 nhưng nội dung là "Không tìm thấy" → Google detect và phạt.
+Phải:
+
+- Trả 404 thật từ server.
+- Hoặc trả 410 nếu nội dung đã xoá vĩnh viễn.
+- SPA: cần SSR phía 404, hoặc set up `_404.html` + server config để
+  serve với status 404.
+
+---
+
+## 10. Hreflang & SEO đa ngôn ngữ
+
+Site có nhiều ngôn ngữ / region → dùng `hreflang` để bot biết version
+nào dành cho user nào.
+
+```html
+<link rel="alternate" hreflang="en" href="https://example.com/post" />
+<link rel="alternate" hreflang="vi" href="https://example.com/vi/post" />
+<link rel="alternate" hreflang="ja" href="https://example.com/ja/post" />
+<link rel="alternate" hreflang="x-default" href="https://example.com/post" />
+```
+
+| `hreflang`         | Ý nghĩa                                       |
+| ------------------ | --------------------------------------------- |
+| `en`               | Tiếng Anh, không phân biệt region             |
+| `en-US` / `en-GB`  | Tiếng Anh + region cụ thể                     |
+| `vi`               | Tiếng Việt                                    |
+| `x-default`        | Fallback khi không match ngôn ngữ nào         |
+
+### Quy tắc bắt buộc
+
+- **Reciprocal**: page `/vi/post` cũng phải link ngược lại `/post` (en).
+- **Self-reference**: page `/post` (en) phải có chính nó trong
+  `hreflang="en"`.
+- Tuyệt đối URL.
+- Nhất quán format (`en-US` không phải `en_US` hay `en-us`).
+- Có thể đặt trong sitemap thay vì HTML — tiện cho site lớn.
+
+URL structure cho i18n có 3 lựa chọn:
+
+| Pattern                   | Ví dụ                       | Ưu                            | Nhược                               |
+| ------------------------- | --------------------------- | ----------------------------- | ----------------------------------- |
+| Subdomain                 | `vi.example.com`            | Tách hạ tầng, độc lập         | Authority không share dễ            |
+| Subdirectory              | `example.com/vi/`           | Share authority, dễ deploy    | Geo-target hạn chế                  |
+| ccTLD                     | `example.vn`                | Tín hiệu region mạnh nhất     | Đắt, phức tạp, mất authority chung  |
+
+Mặc định: **subdirectory** cho đa số case.
+
+---
+
+## 11. Core Web Vitals — performance là ranking factor
+
+Google công khai dùng Core Web Vitals làm **page experience signal**
+trong xếp hạng (đặc biệt trong "tie-break" giữa các page có content
+chất lượng tương đương). Bộ 3 metric (2024-2026):
+
+```text
+   ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+   │     LCP     │    │     INP     │    │     CLS     │
+   │ Largest     │    │ Interaction │    │ Cumulative  │
+   │ Contentful  │    │ to Next     │    │ Layout      │
+   │ Paint       │    │ Paint       │    │ Shift       │
+   ├─────────────┤    ├─────────────┤    ├─────────────┤
+   │ Tốc độ load │    │ Độ mượt     │    │ Stability   │
+   │ phần lớn    │    │ tương tác   │    │ visual      │
+   ├─────────────┤    ├─────────────┤    ├─────────────┤
+   │ Good ≤ 2.5s │    │ Good ≤ 200ms│    │ Good ≤ 0.1  │
+   └─────────────┘    └─────────────┘    └─────────────┘
+```
+
+Google đo bằng **Chrome User Experience Report (CrUX)** — dữ liệu thật
+từ user thật, không phải lab. Ngưỡng "Good" tính theo **75th percentile**
+của user trong 28 ngày gần nhất.
+
+### Tóm tắt cách fix (mỗi cái có 1 bài deep-dive riêng đáng đọc)
+
+| Metric  | Ngắn gọn cách fix                                                    |
+| ------- | -------------------------------------------------------------------- |
+| **LCP** | Preload LCP image, optimize image (WebP/AVIF), critical CSS, CDN, server response < 200ms |
+| **INP** | Break long task (`scheduler.yield()`), web worker, debounce input handler, code-split |
+| **CLS** | Set `width`/`height` cho image, `font-display: optional`, reserve space cho ads/embed, animate `transform` thay vì `top` |
+
+Đo lường:
+
+- **Lab**: Lighthouse, WebPageTest, PageSpeed Insights.
+- **Real user (RUM)**: `web-vitals` library + push lên analytics. Google
+  ranking *chỉ* dùng RUM (CrUX).
+
+```ts
+// src/lib/web-vitals.ts
+import { onCLS, onINP, onLCP } from 'web-vitals';
+
+function send(metric: { name: string; value: number; id: string }) {
+  navigator.sendBeacon(
+    '/api/vitals',
+    JSON.stringify({ ...metric, ts: Date.now(), url: location.href })
+  );
+}
+
+onLCP(send);
+onINP(send);
+onCLS(send);
+```
+
+> Performance không phải "nice to have" cho SEO. Một trang LCP 5s không
+> bao giờ rank được top 3 với keyword cạnh tranh — không phải vì Google
+> trừng phạt 5s, mà vì user nhanh tay back, bounce rate cao, signal kéo
+> ranking xuống.
+
+---
+
+## 12. Spectrum rendering: CSR ↔ SSR ↔ SSG ↔ ISR ↔ Streaming
+
+Đây là **trục quyết định lớn nhất** ảnh hưởng SEO. Hiểu nó trước khi
+chọn framework / pattern.
+
+```text
+                 PRE-COMPUTE                           ON-DEMAND
+   ◄─────────────────────────────────────────────────────────────►
+   ┌────────┐   ┌────────┐   ┌────────┐   ┌────────┐   ┌────────┐
+   │  SSG   │   │  ISR   │   │  SSR   │   │Streaming│  │  CSR   │
+   │ static │   │incremental│ │ server │   │  SSR    │  │client  │
+   │site gen│   │ static │   │ render │   │ (RSC) │   │ render │
+   └────────┘   └────────┘   └────────┘   └────────┘   └────────┘
+   build time   on revalidate per request   per request   browser
+   HTML đã có   cache + bg     render mỗi   stream từng   chỉ <div>
+   sẵn          regenerate     request      chunk        rỗng
+        SEO BEST ────────────────────────────────────► SEO TỆ NHẤT
+```
+
+| Strategy   | HTML wave 1     | TTFB         | Build time | Use case                             |
+| ---------- | --------------- | ------------ | ---------- | ------------------------------------ |
+| **SSG**    | Full content    | Rất thấp     | Cao (mọi page build) | Blog, docs, marketing             |
+| **ISR**    | Full content    | Thấp         | Trung bình | E-commerce catalogue, news vừa      |
+| **SSR**    | Full content    | Trung bình   | Thấp       | Dashboard public, content cá nhân hóa |
+| **Streaming SSR (RSC)** | Shell + stream | Thấp ban đầu | Thấp | App lớn, mix static & dynamic   |
+| **CSR**    | Empty shell     | Rất thấp     | Thấp       | App nội bộ, sau login (không cần SEO) |
+
+### Chọn nhanh
+
+- **Public content tĩnh**: SSG. Không có lý do gì khác.
+- **Catalogue cập nhật vừa**: ISR (revalidate 60s-1h).
+- **Personalized public page** (price theo user, theo region): SSR.
+- **App sau login**: CSR (không cần SEO, ưu tiên DX).
+
+> Quy tắc lông: nếu page có giá trị SEO, **phải có HTML "đầy đủ" trong
+> response wave 1**. Không quan trọng cách bạn đạt được — SSG / SSR /
+> prerender / static export — miễn là có.
+
+---
+
+## 13. SPA & SEO — vì sao React vanilla "tàng hình" với crawler
+
+Một SPA React điển hình (CRA, Vite, react-router) trả về HTML này từ server:
+
+```html
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>App</title>
+    <script type="module" src="/assets/index-abc123.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>
+```
+
+Bot wave 1 thấy:
+- Title duy nhất "App" (mọi page).
+- `<div id="root">` rỗng.
+- Không link `<a href>` nào — toàn bộ navigation render bằng JS.
+- Description, OG, canonical: **không có**.
+
+Wave 2 (vài ngày sau, may ra) Googlebot render JS, thấy nội dung thật
+— *nhưng chỉ cho route hiện tại*. Để discovery route khác, bot phải:
+
+1. Click thử `<a>` (chỉ follow `<a href>`, không follow `onClick`).
+2. Hoặc đợi sitemap.
+3. Hoặc bỏ cuộc.
+
+**Hậu quả thực tế khi triển khai SPA "raw" cho public site:**
+
+- Page index chậm vài ngày → vài tuần.
+- Title / description trong SERP lệch (cũ) hoặc rỗng.
+- Nội dung dynamic (load async sau hydrate) thường **không vào index**.
+- Internal page mồ côi không có sitemap → vĩnh viễn không index.
+- Bing / DuckDuckGo / Baidu / Yandex: gần như không thấy gì.
+- Social share preview: trắng / sai (Facebook scraper không chạy JS).
+
+### Các bệnh điển hình & dấu hiệu nhận diện
+
+```text
+Triệu chứng                         Nguyên nhân
+─────────────────────────────────   ────────────────────────────
+SERP title rỗng / "App"             SPA chưa update <title> (hoặc update bằng JS,
+                                    bot wave 1 không thấy)
+Pages "Discovered, not indexed"     Bot crawl được nhưng wave 2 render thất bại,
+trong Search Console                hoặc content quality kém
+Click vào SERP → trang trắng        SPA cần vài giây load, user back trước khi paint
+Nội dung blog không xuất hiện       Content fetch sau hydrate, wave 2 không đợi network
+trong SERP                          idle đủ lâu
+Share Twitter / FB → preview trống  OG tag được set bằng react-helmet sau JS chạy →
+                                    crawler social không thấy
+```
+
+**Có 2 cách fix:**
+
+1. Đừng dùng SPA cho public content (chuyển sang Next.js / Astro / Remix).
+2. Nếu bắt buộc SPA → **prerender**.
+
+---
+
+## 14. Prerender — build-time, runtime, dynamic rendering
+
+Prerender = sinh sẵn HTML với content thật cho bot, để bot không phải
+đợi JS. Có 3 chiến lược chính:
+
+```text
+┌────────────────────────────────────────────────────────────┐
+│ 1. STATIC PRERENDER (build-time)                           │
+│    Build chạy headless browser → snapshot HTML cho mỗi route│
+│    Deploy file HTML cùng JS bundle                          │
+│    ✓ Đơn giản, free runtime cost                            │
+│    ✗ Không scale với route động (millions of products)      │
+│    ✗ Mỗi update content → rebuild                           │
+└────────────────────────────────────────────────────────────┘
+              ↓
+┌────────────────────────────────────────────────────────────┐
+│ 2. RUNTIME PRERENDER (dynamic / on-demand)                 │
+│    Server detect request là bot → chạy headless browser     │
+│    render page → trả HTML "đẹp"                             │
+│    Request từ user thường → trả SPA shell như cũ            │
+│    ✓ Scale tốt với route động                               │
+│    ✗ Cần infra render service (rendertron, prerender.io)    │
+│    ✗ "Cloaking" risk nếu content khác nhau                  │
+└────────────────────────────────────────────────────────────┘
+              ↓
+┌────────────────────────────────────────────────────────────┐
+│ 3. ISOMORPHIC SSR (best long-term)                         │
+│    Cùng React component chạy cả server (Node) lẫn client    │
+│    Server render → HTML đầy đủ                              │
+│    Client hydrate → interactive                             │
+│    → Đây là Next.js, Remix, Astro, ...                      │
+└────────────────────────────────────────────────────────────┘
+```
+
+### Static prerender với Vite + react-snap / vite-plugin-prerender
+
+Cho SPA Vite + React đã tồn tại, không muốn rewrite Next.js — đơn giản
+nhất là **build-time prerender với headless browser**:
+
+```ts
+// vite.config.ts
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+import prerender from 'vite-plugin-prerender';
+
+export default defineConfig({
+  plugins: [
+    react(),
+    prerender({
+      staticDir: 'dist',
+      routes: ['/', '/about', '/blog', '/blog/seo'],
+      renderer: '@prerenderer/renderer-puppeteer',
+      rendererOptions: {
+        renderAfterDocumentEvent: 'app-rendered',
+        // App của bạn dispatch event này khi data đã fetch xong:
+        // window.dispatchEvent(new Event('app-rendered'))
+      },
+    }),
+  ],
+});
+```
+
+Pipeline:
+
+```text
+1. vite build → SPA bundle (dist/index.html)
+2. plugin spawn headless Chrome
+3. Với mỗi route: load → đợi event 'app-rendered' → snapshot HTML
+4. Ghi /dist/about/index.html, /dist/blog/index.html, ...
+5. Deploy dist/ — bot truy cập /about → server trả pre-rendered HTML
+6. Browser nhận HTML → hydrate → SPA bình thường
+```
+
+### Dynamic prerender với prerender.io / Rendertron
+
+Dùng khi route động lớn (ví dụ marketplace 500K product):
+
+```text
+                  ┌────────────────────┐
+   request ──────►│  Reverse proxy /   │
+                  │  edge function     │
+                  └─────────┬──────────┘
+                            │ User-agent là bot?
+                  ┌─────────┴──────────┐
+                  │                    │
+                YES                   NO
+                  │                    │
+                  ▼                    ▼
+       ┌───────────────────┐   ┌──────────────┐
+       │ prerender.io /    │   │ origin server│
+       │ rendertron        │   │ trả SPA shell│
+       │ (chạy puppeteer)  │   └──────────────┘
+       │ trả HTML đầy đủ   │
+       └───────────────────┘
+```
+
+Detect bot bằng `User-Agent` (Googlebot, Bingbot, facebookexternalhit, …).
+Cẩn thận **cloaking**: nếu HTML cho bot khác hoàn toàn HTML cho user, bị
+phạt nặng. Quy tắc: **nội dung phải tương đương** — chỉ khác cách render.
+
+### Tại sao SSG / SSR thường tốt hơn dynamic prerender
+
+| Tiêu chí          | Static prerender | Dynamic prerender | SSR isomorphic |
+| ----------------- | ---------------- | ----------------- | -------------- |
+| Cost              | Free runtime     | Phải chạy puppeteer| Vừa phải      |
+| Scale             | Hữu hạn (build)  | Vô hạn            | Vô hạn         |
+| Update content    | Rebuild          | Realtime          | Realtime       |
+| TTFB cho user     | Rất nhanh (CDN)  | Trung bình        | Trung bình     |
+| TTFB cho bot      | Rất nhanh        | Chậm (puppeteer)  | Trung bình     |
+| Cloaking risk     | Không            | Có                | Không          |
+| Setup phức tạp    | Trung bình       | Cao               | Tùy framework  |
+
+> Giải pháp tốt nhất cho project mới: **chọn framework SSR-first ngay
+> từ đầu** (Next.js, Remix, Astro). Prerender chỉ nên là *liều thuốc cấp
+> cứu* cho legacy SPA không thể rewrite ngay.
+
+---
+
+## 15. React-specific: Next.js / Remix / Astro / react-helmet-async
+
+### react-helmet-async (cho SPA)
+
+Quản lý `<head>` từ component. Nhưng nhớ: **chỉ chạy ở client** trong
+SPA → không cứu wave 1.
+
+```tsx
+import { Helmet, HelmetProvider } from 'react-helmet-async';
+
+function PostPage({ post }: { post: Post }) {
+  return (
+    <>
+      <Helmet>
+        <title>{post.title} | jvinhit</title>
+        <meta name="description" content={post.description} />
+        <link rel="canonical" href={`https://example.com/posts/${post.slug}`} />
+        <meta property="og:title" content={post.title} />
+      </Helmet>
+      <article>{/* ... */}</article>
+    </>
+  );
+}
+```
+
+Combine với prerender (mục 14) → wave 1 đã có meta đúng.
+
+### Next.js Metadata API (App Router)
+
+Next.js 13+ có **server-first metadata** — generate ở server, vào HTML
+wave 1 mặc định:
+
+```tsx
+// app/posts/[slug]/page.tsx
+import type { Metadata } from 'next';
+import { getPost } from '@/lib/posts';
+
+interface Props {
+  params: Promise<{ slug: string }>;
+}
+
+export async function generateMetadata({ params }: Props): Promise<Metadata> {
+  const { slug } = await params;
+  const post = await getPost(slug);
+
+  return {
+    title: post.title,
+    description: post.description,
+    alternates: {
+      canonical: `https://example.com/posts/${slug}`,
+    },
+    openGraph: {
+      title: post.title,
+      description: post.description,
+      type: 'article',
+      url: `https://example.com/posts/${slug}`,
+      images: [{ url: post.cover, width: 1200, height: 630 }],
+    },
+    twitter: {
+      card: 'summary_large_image',
+    },
+  };
+}
+
+export default async function Page({ params }: Props) {
+  const { slug } = await params;
+  const post = await getPost(slug);
+  return <article>{/* ... */}</article>;
+}
+```
+
+`generateMetadata` chạy server-side, kết quả nằm trong HTML đầu tiên — bot
+wave 1 đọc được luôn. Đây là cách **đúng** nhất khi dùng Next.js App
+Router cho SEO.
+
+### Remix — `meta` export
+
+```tsx
+// app/routes/posts.$slug.tsx
+import type { MetaFunction, LoaderFunctionArgs } from '@remix-run/node';
+import { json, useLoaderData } from '@remix-run/react';
+import { getPost } from '~/lib/posts';
+
+export async function loader({ params }: LoaderFunctionArgs) {
+  const post = await getPost(params.slug!);
+  return json({ post });
+}
+
+export const meta: MetaFunction<typeof loader> = ({ data }) => {
+  if (!data) return [];
+  return [
+    { title: `${data.post.title} | jvinhit` },
+    { name: 'description', content: data.post.description },
+    { property: 'og:title', content: data.post.title },
+    { tagName: 'link', rel: 'canonical', href: `https://example.com/posts/${data.post.slug}` },
+  ];
+};
+
+export default function Post() {
+  const { post } = useLoaderData<typeof loader>();
+  return <article>{/* ... */}</article>;
+}
+```
+
+### Astro (SSG-first, dùng React component khi cần)
+
+Astro thiên về **content site**: blog, docs, marketing. Mọi route mặc
+định là HTML thuần (zero JS), React/Vue component được "island" hydrate
+khi cần. SEO mặc định tốt nhất trong số các framework hiện đại.
+
+```astro
+---
+// src/pages/posts/[...slug].astro
+import { getCollection } from 'astro:content';
+import BaseLayout from '@/layouts/BaseLayout.astro';
+
+export async function getStaticPaths() {
+  const posts = await getCollection('posts');
+  return posts.map((post) => ({
+    params: { slug: post.id },
+    props: { post },
+  }));
+}
+
+const { post } = Astro.props;
+const { Content } = await post.render();
+---
+
+<BaseLayout
+  title={post.data.title}
+  description={post.data.description}
+  canonical={`https://example.com/posts/${post.id}`}
+  ogImage={post.data.cover?.src}
+>
+  <article>
+    <h1>{post.data.title}</h1>
+    <Content />
+  </article>
+</BaseLayout>
+```
+
+`BaseLayout` set `<title>`, meta, OG, JSON-LD ở server time → wave 1 đầy
+đủ. Đây là pattern blog này dùng — và là lý do tại sao chỉ với
+`@astrojs/sitemap` và `robots.txt` đơn giản đã đủ SEO ổn cho bài.
+
+### So sánh nhanh
+
+| Framework  | Default rendering    | SEO setup        | Khi nào pick                          |
+| ---------- | -------------------- | ---------------- | ------------------------------------- |
+| Next.js    | Hybrid (RSC + SSR)   | Metadata API     | App phức tạp, mix dynamic + static    |
+| Remix      | SSR                  | `meta` export    | Form-heavy, web standards purist      |
+| Astro      | SSG (per-page opt-in)| Frontmatter + layout | Content site, blog, docs           |
+| Gatsby     | SSG                  | gatsby-plugin-seo | Legacy migration only — không pick mới |
+| CRA / Vite SPA | CSR              | react-helmet + prerender | App nội bộ, dashboard sau login   |
+
+---
+
+## 16. Đo lường — Search Console, Lighthouse, URL Inspection
+
+### Google Search Console (GSC) — must have
+
+Verify domain (DNS TXT hoặc HTML file). Sau đó theo dõi 4 panel chính:
+
+| Panel              | Trả lời câu hỏi                                          |
+| ------------------ | -------------------------------------------------------- |
+| **Performance**    | Query nào ra ấn tượng / click? CTR, position theo trang  |
+| **Pages**          | Mỗi URL — indexed? bị loại? lý do gì?                    |
+| **Sitemaps**       | Submit + tỉ lệ discovered/indexed                        |
+| **URL Inspection** | Test 1 URL cụ thể: bot thấy gì, render ra gì, có index không |
+
+URL Inspection có "View tested page" — xem **HTML render thật** của
+Googlebot. Cực hữu ích để debug "tại sao SPA không index".
+
+### Lighthouse — lab metric
+
+```bash
+npx lighthouse https://example.com/post --view --preset=desktop
+```
+
+SEO category check:
+- Có title, description, viewport?
+- Status 200, không robots noindex?
+- Anchor text descriptive?
+- `alt` cho image?
+- `lang` attribute trên `<html>`?
+
+### Bing Webmaster Tools
+
+Đừng quên — Bing chiếm ~3-5% search market global, nhưng nó là source
+data của ChatGPT, DuckDuckGo, Yahoo. Submit sitemap, verify, theo dõi.
+
+### Log-based analysis (advanced)
+
+Lọc access log lấy User-Agent là Googlebot/Bingbot — biết bot crawl gì,
+tần suất bao nhiêu, status code nào. Phát hiện sớm:
+- Bot bị 5xx → ranking drop sắp tới.
+- Bot crawl page rác → wasted crawl budget.
+- Bot không vào page mới → vấn đề internal linking.
+
+---
+
+## 17. Pitfalls thường gặp trong production
+
+Tổng hợp từ review thực tế. Mỗi cái mất 1-3 tuần để recover ranking nếu
+trượt vào.
+
+### 17.1. `noindex` trượt từ staging lên production
+
+```html
+<!-- staging.example.com -->
+<meta name="robots" content="noindex, nofollow" />
+```
+
+Code merge nguyên xi → production. Sau 7-14 ngày toàn bộ index biến mất.
+**Fix**: dùng `X-Robots-Tag` ở server level dựa trên `process.env.NODE_ENV`,
+không hard-code trong React component.
+
+### 17.2. Canonical trỏ sai
+
+```html
+<!-- Page /vi/post -->
+<link rel="canonical" href="https://example.com/post" />
+```
+
+Trỏ về EN version → Google deduplicate, EN page rank, VI page biến mất.
+**Fix**: canonical phải self-reference, hreflang quản lý ngôn ngữ.
+
+### 17.3. Internal link bằng `<div onClick>` thay vì `<a href>`
+
+```tsx
+// ❌ Bot không follow
+<div onClick={() => navigate('/post/123')}>Đọc tiếp</div>
+
+// ✅
+<Link to="/post/123">Đọc tiếp</Link>  // react-router
+<a href="/post/123">Đọc tiếp</a>      // plain
+```
+
+Mất internal link → mất signal authority → rank tệ. Cũng phá keyboard a11y.
+
+### 17.4. Lazy load nội dung quan trọng
+
+`IntersectionObserver` hoặc `dynamic import` cho hero section, content
+chính → bot không scroll, không thấy. **Quy tắc**: lazy load **dưới
+fold**, eager load **trong viewport ban đầu**.
+
+### 17.5. Title duplicate / generic
+
+Mọi page là `App | jvinhit`. SERP không phân biệt được. **Fix**: title
+unique mỗi page, có keyword chính, ≤60 chars.
+
+### 17.6. Soft 404 từ SPA
+
+Route không tồn tại → SPA show "Not found" với status 200. **Fix**:
+- Server config trả 404 thật cho route không có.
+- Hoặc set up explicit 404 page với meta `noindex`.
+
+### 17.7. Mobile-first index, viewport thiếu
+
+```html
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+```
+
+Quên thẻ này → Google đo bằng mobile-bot, content tràn → rank tệ.
+
+### 17.8. CLS từ image không có size
+
+```html
+<!-- ❌ Layout shift khi image load -->
+<img src="hero.png" />
+
+<!-- ✅ Reserve space -->
+<img src="hero.png" width="1200" height="600" alt="..." />
+```
+
+CLS > 0.25 → URL bị đánh dấu "Poor" trong CrUX → rank kém.
+
+### 17.9. Hash routing `/#/posts/123`
+
+Google **không index** fragment riêng. Mọi `#/foo` được coi là cùng 1
+URL `/`. **Fix**: dùng History API (`pushState`) thay vì hash router.
+
+### 17.10. Submit sitemap rồi quên update
+
+URL trong sitemap đã 404 từ 6 tháng trước. Bot lãng phí crawl budget,
+GSC báo error. **Fix**: regenerate sitemap mỗi build, validate.
+
+### 17.11. Chặn JS / CSS trong robots.txt
+
+```text
+User-agent: *
+Disallow: /assets/
+Disallow: /static/js/
+```
+
+Bot không tải được CSS/JS → render fail → page index như "trắng". **Fix**:
+luôn allow asset path. Google đã khuyến cáo điều này từ 2014.
+
+### 17.12. Redirect chain dài
+
+```text
+http://example.com  →  https://example.com  →  https://www.example.com  →  https://www.example.com/en
+```
+
+Mỗi hop mất ranking signal (giảm dần qua 301). **Fix**: redirect 1 lần
+tới đích cuối cùng.
+
+### 17.13. JSON-LD markup không khớp content
+
+Markup nói rating 5 sao nhưng page không có review → **manual action**
+"Spammy structured data" → mất rich result trên toàn site, có thể nặng
+hơn.
+
+### 17.14. CDN chặn Googlebot vì nghi DDoS
+
+Cloudflare / AWS WAF rate-limit bot — đặc biệt khi crawl burst. Bot bị
+429/503 → ngừng crawl → drop index. **Fix**: whitelist Googlebot bằng
+[verify](https://developers.google.com/search/docs/crawling-indexing/verifying-googlebot)
+chính chủ (reverse DNS), không phải chỉ User-Agent.
+
+---
+
+## 18. Checklist trước khi launch
+
+Cắt theo 5 nhóm. Đi qua trước mỗi PR major hoặc launch site mới.
+
+### Crawl & index
+
+- [ ] `robots.txt` đúng — không Disallow nhầm asset / route quan trọng
+- [ ] `sitemap.xml` (hoặc `sitemap-index.xml`) tồn tại, list trong `robots.txt`
+- [ ] `<meta name="robots" content="index, follow">` ở mọi public page
+- [ ] **KHÔNG** có `noindex` từ staging trượt sang production
+- [ ] Test URL Inspection trong GSC — bot thấy đúng nội dung wave 1
+
+### On-page
+
+- [ ] Mỗi page có `<title>` unique, ≤60 chars, có keyword chính
+- [ ] Mỗi page có `<meta description>` unique, ≤160 chars
+- [ ] `<link rel="canonical">` self-referencing, tuyệt đối URL
+- [ ] 1 và chỉ 1 `<h1>` per page, đúng nội dung chính
+- [ ] Heading theo thứ tự, không skip cấp
+- [ ] Mọi `<img>` có `alt` mô tả nội dung
+- [ ] `<html lang="...">` set đúng
+
+### Social & rich result
+
+- [ ] OG: `title`, `description`, `image` (1200x630), `url`, `type`
+- [ ] Twitter Card: `summary_large_image` cho post có image
+- [ ] JSON-LD: `Article` / `BreadcrumbList` cho post; `Organization` cho homepage
+- [ ] Test ở [Rich Results Test](https://search.google.com/test/rich-results)
+- [ ] Test ở Facebook Debugger / X Card Validator
+
+### Architecture & rendering
+
+- [ ] HTML wave 1 chứa nội dung chính (test bằng `view-source:`)
+- [ ] Internal navigation dùng `<a href>` (không `<div onClick>`)
+- [ ] Route 404 trả status **404 thật**, không 200 + "Not found"
+- [ ] URL nhất quán: lowercase, hyphen, trailing slash
+- [ ] HTTPS, redirect 301 từ http / non-canonical host
+- [ ] Hreflang đầy đủ + reciprocal (nếu i18n)
+
+### Performance (Web Vitals)
+
+- [ ] LCP ≤ 2.5s ở 75th percentile (CrUX)
+- [ ] INP ≤ 200ms
+- [ ] CLS ≤ 0.1
+- [ ] PageSpeed Insights "Good" cho mobile
+- [ ] Có RUM monitoring (`web-vitals` library)
+
+---
+
+SEO frontend không phải dán meta tag. Nó là một **bài toán hệ thống**:
+chọn rendering strategy đúng, kiểm soát từng tầng từ `robots.txt` → HTML
+wave 1 → semantic markup → structured data → Web Vitals. Nếu bạn ngồi
+review PR và thấy "thêm `<a href>`" hoặc "đổi `div` thành `main`" — đó
+không phải nit-pick, đó là SEO. Và nếu PR đó deploy SPA mới chưa
+prerender lên public domain với 100K traffic SEO/tháng — bạn vừa thấy
+một tai nạn sản xuất sắp xảy ra.
+
+Hai thứ duy nhất đáng nhớ sau khi gấp bài này lại:
+
+1. **Bot phải đọc được nội dung trong wave 1** — mọi technique trong
+   bài đều phục vụ điều này.
+2. **SEO là một feature**, không phải một plugin gắn vào cuối — và như
+   mọi feature, nó phải có owner, có metric, có monitor.

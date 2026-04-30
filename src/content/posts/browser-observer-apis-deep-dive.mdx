@@ -1,0 +1,1210 @@
+---
+title: 'Observer APIs deep dive — MutationObserver, ResizeObserver và họ hàng trong browser'
+description: 'Đào sâu Observer pattern trong browser: MutationObserver theo dõi DOM, ResizeObserver bắt resize, IntersectionObserver, PerformanceObserver, ReportingObserver — concept, use case production, pitfall, memory cleanup.'
+pubDate: 2026-04-30
+tags: [javascript, browser-api, performance, frontend, dom]
+draft: false
+---
+
+Browser cung cấp một họ API chia sẻ chung một pattern: `new XxxObserver(cb)`,
+gọi `observe(target, options)`, callback chạy bất đồng bộ khi điều kiện
+thoả mãn, và bạn `disconnect()` khi xong. Chúng giải quyết những vấn
+đề mà ngày xưa phải hack bằng `setInterval` + diff thủ công, hoặc
+những sự kiện căn bản không có DOM event tương ứng.
+
+Bài này deep dive **5 Observer chính** — `MutationObserver` (DOM),
+`ResizeObserver` (kích thước), `IntersectionObserver` (visibility),
+`PerformanceObserver` (đo lường), `ReportingObserver` (browser
+violations) — kèm use case thực chiến, pitfall, và pattern cleanup
+chuẩn trong React/framework.
+
+---
+
+## Mục lục
+
+1. [Observer pattern — vì sao có cả family](#1-observer-pattern--vì-sao-có-cả-family)
+2. [MutationObserver — concept & options](#2-mutationobserver--concept--options)
+3. [MutationObserver — 6 use case thực chiến](#3-mutationobserver--6-use-case-thực-chiến)
+4. [ResizeObserver — bắt mọi resize, không cần `window.resize`](#4-resizeobserver--bắt-mọi-resize-không-cần-windowresize)
+5. [IntersectionObserver advanced — beyond lazy load](#5-intersectionobserver-advanced--beyond-lazy-load)
+6. [PerformanceObserver — đo runtime production](#6-performanceobserver--đo-runtime-production)
+7. [ReportingObserver — bắt deprecation, CSP, intervention](#7-reportingobserver--bắt-deprecation-csp-intervention)
+8. [So sánh — chọn observer nào cho vấn đề nào](#8-so-sánh--chọn-observer-nào-cho-vấn-đề-nào)
+9. [Memory leak & cleanup — pattern chuẩn React](#9-memory-leak--cleanup--pattern-chuẩn-react)
+10. [Pitfalls thường gặp](#10-pitfalls-thường-gặp)
+11. [Custom Observer — pattern tự xây](#11-custom-observer--pattern-tự-xây)
+12. [Checklist](#12-checklist)
+
+---
+
+## 1. Observer pattern — vì sao có cả family
+
+Trước khi có Observer API, frontend code đầy `setInterval` và polling:
+
+```ts
+// ❌ ngày xưa: poll size mỗi 100ms — main thread chết
+setInterval(() => {
+  const w = el.offsetWidth;
+  if (w !== prevWidth) onResize(w);
+  prevWidth = w;
+}, 100);
+
+// ❌ MutationEvent (deprecated): synchronous, mỗi mutation = stack frame mới
+el.addEventListener('DOMNodeInserted', handler);
+```
+
+Cả 2 cách đều **fire trên main thread đồng bộ**, blocking, và scale
+cực kém. Observer API ra đời với 4 tính chất chung:
+
+| Tính chất               | Ý nghĩa                                                        |
+| ----------------------- | -------------------------------------------------------------- |
+| **Async**               | Callback chạy sau khi browser hoàn thành batch — không block   |
+| **Batched**             | Nhiều thay đổi gom lại 1 lần callback                          |
+| **Off-main-thread**     | Phần lớn observer work làm bên C++ engine, JS chỉ nhận record  |
+| **Disconnect-able**     | `.disconnect()` rõ ràng — không leak listener                 |
+
+```text
+                   ┌─────────────────────┐
+                   │ DOM/Layout/Paint    │
+                   │ thay đổi (~~~)      │
+                   └──────────┬──────────┘
+                              │ engine batch
+                              ▼
+                   ┌─────────────────────┐
+                   │ Microtask / RAF     │
+                   │ flush               │
+                   └──────────┬──────────┘
+                              │ async dispatch
+                              ▼
+                   ┌─────────────────────┐
+                   │ Observer callback   │  ◄── JS chỉ chạy phần này
+                   │ với MutationRecord  │
+                   └─────────────────────┘
+```
+
+Hệ quả: bạn có thể `observe` 10k node mà gần như không tốn perf.
+Browser engine làm hết, JS chỉ chạy khi thật sự có sự kiện.
+
+### 5 Observer chính trong browser modern
+
+| API                       | Bắt sự kiện gì                          | Hỗ trợ      |
+| ------------------------- | --------------------------------------- | ----------- |
+| `MutationObserver`        | DOM tree/attribute thay đổi             | Mọi browser |
+| `ResizeObserver`          | Element thay đổi kích thước             | 2020+       |
+| `IntersectionObserver`    | Element vào/ra viewport                 | 2018+       |
+| `PerformanceObserver`     | Performance entry mới (LCP, CLS, LoAF…) | Mọi browser |
+| `ReportingObserver`       | Deprecation, CSP, intervention reports  | Chrome/Edge |
+
+---
+
+## 2. MutationObserver — concept & options
+
+`MutationObserver` báo bạn khi **DOM tree** thay đổi: thêm/xoá node,
+đổi attribute, đổi text content. Đây là API thay thế cho
+`DOMNodeInserted`/`DOMSubtreeModified` cũ — nhanh hơn nhiều và đúng
+chuẩn modern.
+
+### API cơ bản
+
+```ts
+const observer = new MutationObserver((mutations, observerInstance) => {
+  for (const m of mutations) {
+    console.log(m.type, m.target, m.addedNodes, m.removedNodes);
+  }
+});
+
+observer.observe(targetNode, {
+  childList: true,
+  attributes: true,
+  characterData: true,
+  subtree: true,
+  attributeOldValue: true,
+  characterDataOldValue: true,
+  attributeFilter: ['class', 'data-state'],
+});
+
+// Khi xong:
+observer.disconnect();
+```
+
+### Options — cẩn thận với scope
+
+| Option                  | Bắt thay đổi gì                                          |
+| ----------------------- | -------------------------------------------------------- |
+| `childList`             | Thêm/xoá **direct children**                             |
+| `attributes`            | Thay đổi attribute trên **target**                       |
+| `characterData`         | Thay đổi `Text`/`CharacterData` node                     |
+| `subtree`               | Áp dụng recursive vào **toàn bộ descendant**             |
+| `attributeOldValue`     | Lưu giá trị cũ của attribute trong `MutationRecord`      |
+| `characterDataOldValue` | Lưu text cũ                                              |
+| `attributeFilter`       | Mảng attribute name — chỉ bắt những cái này              |
+
+Phải có **ít nhất 1 trong 3** (`childList`, `attributes`,
+`characterData`), nếu không sẽ throw `TypeError`.
+
+### Quy tắc vàng: scope hẹp nhất có thể
+
+```ts
+// ❌ scope quá rộng — observe TOÀN BỘ document, mọi mutation
+observer.observe(document.body, {
+  childList: true,
+  subtree: true,
+  attributes: true,
+});
+
+// ✅ scope hẹp — chỉ class change trên 1 element
+observer.observe(htmlElement, {
+  attributes: true,
+  attributeFilter: ['class'],
+});
+```
+
+Trên trang lớn, observer rộng có thể tạo **hàng nghìn record/giây**
+khi user scroll, hover, type. Mỗi record là object trong heap → GC
+pressure, callback chạy lag.
+
+### `MutationRecord` — đọc gì
+
+```ts
+interface MutationRecord {
+  type: 'childList' | 'attributes' | 'characterData';
+  target: Node;            // node bị/đang thay đổi
+  addedNodes: NodeList;    // chỉ với childList
+  removedNodes: NodeList;
+  previousSibling: Node | null;
+  nextSibling: Node | null;
+  attributeName: string | null;     // chỉ với attributes
+  attributeNamespace: string | null;
+  oldValue: string | null;          // nếu bật *OldValue
+}
+```
+
+### `takeRecords()` — flush trước disconnect
+
+```ts
+// Nếu có mutation pending nhưng chưa fire callback,
+// disconnect() sẽ DROP chúng. Lấy ra trước:
+const pending = observer.takeRecords();
+processPending(pending);
+observer.disconnect();
+```
+
+Pattern hữu ích khi bạn cần đảm bảo không miss event nào (form
+auto-save, undo/redo).
+
+### Async behavior — microtask, không sync
+
+```ts
+const obs = new MutationObserver(() => console.log('cb'));
+obs.observe(div, { childList: true });
+
+div.appendChild(document.createElement('span'));  // mutation 1
+div.appendChild(document.createElement('span'));  // mutation 2
+console.log('after appends');
+
+// Output:
+// after appends
+// cb           ◄── 1 lần callback, 2 record
+```
+
+Browser batch mutation cùng tick, callback chạy ở **microtask** sau
+khi script hiện tại xong. Nghĩa là:
+
+- **Không** infinite loop nếu callback đổi DOM tiếp (sẽ batch ở tick sau).
+- **Phải** xử lý array `mutations` trong callback — không phải single record.
+
+---
+
+## 3. MutationObserver — 6 use case thực chiến
+
+### a. Watch third-party widget injection
+
+Bạn nhúng widget (chat, ads, analytics) load JS từ vendor. Vendor
+inject DOM khi xong. Bạn cần biết để hide loading state hoặc style override:
+
+```ts
+const observer = new MutationObserver((mutations, obs) => {
+  for (const m of mutations) {
+    for (const node of m.addedNodes) {
+      if (node instanceof HTMLElement && node.id === 'intercom-frame') {
+        styleIntercomLauncher(node);
+        obs.disconnect();        // chỉ cần bắt 1 lần → cleanup
+        return;
+      }
+    }
+  }
+});
+
+observer.observe(document.body, { childList: true, subtree: true });
+```
+
+Pattern: `disconnect` trong callback ngay khi tìm thấy → không leak.
+
+### b. Auto-init component khi DOM được inject động
+
+Server-rendered HTML từ legacy backend (Rails partial, PHP fragment)
+được inject runtime, không qua React. Bạn vẫn muốn auto-attach hành
+vi (tooltip, dropdown):
+
+```ts
+const componentInitializers = {
+  '[data-tooltip]': initTooltip,
+  '[data-dropdown]': initDropdown,
+  '[data-modal-trigger]': initModal,
+};
+
+const observer = new MutationObserver((mutations) => {
+  for (const m of mutations) {
+    for (const node of m.addedNodes) {
+      if (!(node instanceof HTMLElement)) continue;
+      for (const [selector, init] of Object.entries(componentInitializers)) {
+        // node tự match
+        if (node.matches(selector)) init(node);
+        // descendant match
+        node.querySelectorAll(selector).forEach((el) =>
+          init(el as HTMLElement)
+        );
+      }
+    }
+  }
+});
+
+observer.observe(document.body, { childList: true, subtree: true });
+```
+
+Đây là cách Stimulus, htmx, và các "sprinkles JS" framework làm
+internally.
+
+### c. Detect dark mode class change trên `<html>`
+
+Theme switcher đổi `class="dark"` trên `<html>`. Bạn cần re-render
+canvas/SVG/chart khớp theme:
+
+```ts
+const html = document.documentElement;
+
+const observer = new MutationObserver(() => {
+  const isDark = html.classList.contains('dark');
+  redrawChart(isDark);
+});
+
+observer.observe(html, {
+  attributes: true,
+  attributeFilter: ['class'],
+});
+```
+
+Đơn giản hơn pub-sub global state — đặc biệt nếu theme switcher là
+3rd-party script bạn không control.
+
+### d. Form auto-save khi field xuất hiện
+
+Multi-step form mount field theo step. Bạn muốn auto-save mỗi khi
+input mới appear (gắn debounce listener):
+
+```ts
+function attachAutoSave(input: HTMLInputElement) {
+  input.addEventListener('input', debounce(() => save(input), 500));
+}
+
+const observer = new MutationObserver((mutations) => {
+  for (const m of mutations) {
+    for (const node of m.addedNodes) {
+      if (node instanceof HTMLInputElement) attachAutoSave(node);
+      if (node instanceof HTMLElement) {
+        node.querySelectorAll('input').forEach(attachAutoSave);
+      }
+    }
+  }
+});
+
+observer.observe(formEl, { childList: true, subtree: true });
+```
+
+### e. Bridge legacy library → modern framework
+
+Khi migrate từ jQuery plugin sang React, có giai đoạn 2 thế giới sống
+chung. Plugin jQuery thay đổi DOM mà React không biết → React re-render
+ghi đè plugin's work.
+
+`MutationObserver` cho phép bạn watch **chỗ jQuery chạm vào**, và
+sync state ngược về React:
+
+```ts
+function useJqueryPluginValue(elRef: RefObject<HTMLElement>) {
+  const [value, setValue] = useState('');
+
+  useEffect(() => {
+    const el = elRef.current;
+    if (!el) return;
+
+    const obs = new MutationObserver(() => {
+      setValue(el.dataset.selectedValue ?? '');
+    });
+    obs.observe(el, {
+      attributes: true,
+      attributeFilter: ['data-selected-value'],
+    });
+    return () => obs.disconnect();
+  }, [elRef]);
+
+  return value;
+}
+```
+
+### f. Test helper — wait for DOM
+
+Cleaner hơn `waitFor` với polling — Testing Library mặc định dùng
+`MutationObserver`:
+
+```ts
+function waitForElement(selector: string, timeout = 3000): Promise<Element> {
+  return new Promise((resolve, reject) => {
+    const existing = document.querySelector(selector);
+    if (existing) return resolve(existing);
+
+    const timer = setTimeout(() => {
+      obs.disconnect();
+      reject(new Error(`Timeout waiting for ${selector}`));
+    }, timeout);
+
+    const obs = new MutationObserver(() => {
+      const el = document.querySelector(selector);
+      if (el) {
+        clearTimeout(timer);
+        obs.disconnect();
+        resolve(el);
+      }
+    });
+
+    obs.observe(document.body, { childList: true, subtree: true });
+  });
+}
+```
+
+> Pattern này tốt hơn `setInterval` polling: callback chỉ fire khi
+> thật sự có DOM mutation. Nếu không có activity, không tốn CPU.
+
+---
+
+## 4. ResizeObserver — bắt mọi resize, không cần `window.resize`
+
+`window.addEventListener('resize')` chỉ bắt **viewport** resize. Còn
+khi:
+
+- Sidebar collapse/expand → main content rộng/hẹp.
+- Parent flex container đổi.
+- Font load xong → text reflow.
+- Image load xong → container nở.
+
+`window.resize` không fire. `ResizeObserver` thì fire cho **mọi
+element bị resize**, bất kể nguyên nhân.
+
+### API
+
+```ts
+const observer = new ResizeObserver((entries, obs) => {
+  for (const entry of entries) {
+    const { width, height } = entry.contentRect;
+    handleResize(entry.target, width, height);
+  }
+});
+
+observer.observe(el);
+observer.observe(el2, { box: 'border-box' });
+
+observer.disconnect();
+observer.unobserve(el);  // chỉ ngừng 1 element
+```
+
+### `contentRect` vs `borderBoxSize` vs `devicePixelContentBoxSize`
+
+| Property                       | Đo gì                                                | Khi nào dùng              |
+| ------------------------------ | ---------------------------------------------------- | ------------------------- |
+| `contentRect`                  | Content box (excl padding/border) trong CSS px       | Compatibility, đa số case |
+| `contentBoxSize[0]`            | Content box, supports writing-mode (vertical text)   | Layout đa hướng           |
+| `borderBoxSize[0]`             | Border box (incl padding + border)                   | Match `offsetWidth/Height`|
+| `devicePixelContentBoxSize[0]` | Pixel chính xác trên device pixel                    | Canvas HiDPI              |
+
+```ts
+new ResizeObserver(([entry]) => {
+  // ✅ canvas chuẩn HiDPI — vẽ với physical pixel
+  const dpr = window.devicePixelRatio;
+  const w = entry.devicePixelContentBoxSize?.[0]?.inlineSize
+         ?? entry.contentBoxSize[0].inlineSize * dpr;
+  const h = entry.devicePixelContentBoxSize?.[0]?.blockSize
+         ?? entry.contentBoxSize[0].blockSize * dpr;
+  canvas.width = w;
+  canvas.height = h;
+}).observe(canvas);
+```
+
+### Use case: auto-resize textarea theo nội dung
+
+```ts
+function autoGrow(textarea: HTMLTextAreaElement) {
+  const obs = new ResizeObserver(() => {
+    textarea.style.height = 'auto';
+    textarea.style.height = textarea.scrollHeight + 'px';
+  });
+  obs.observe(textarea);
+  textarea.addEventListener('input', () => {
+    textarea.style.height = 'auto';
+    textarea.style.height = textarea.scrollHeight + 'px';
+  });
+  return () => obs.disconnect();
+}
+```
+
+### Use case: chart/d3 redraw khi container resize
+
+```ts
+function useResponsiveChart(ref: RefObject<HTMLDivElement>) {
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const obs = new ResizeObserver(([entry]) => {
+      const { width, height } = entry.contentRect;
+      drawChart(el, { width, height });
+    });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [ref]);
+}
+```
+
+### Use case: container queries fallback (browser cũ)
+
+Container queries là native 2023+, nhưng nếu phải support browser
+cũ, `ResizeObserver` thay được:
+
+```ts
+function attachContainerQueries(el: HTMLElement) {
+  const obs = new ResizeObserver(([entry]) => {
+    const w = entry.contentRect.width;
+    el.classList.toggle('container-md', w >= 400);
+    el.classList.toggle('container-lg', w >= 800);
+  });
+  obs.observe(el);
+}
+```
+
+### Loop infinite — cảnh báo nguy hiểm
+
+```ts
+// ❌ resize → callback đổi size → resize → callback → ...
+new ResizeObserver(([entry]) => {
+  const w = entry.contentRect.width;
+  entry.target.style.width = w + 1 + 'px';   // trigger resize tiếp
+}).observe(el);
+```
+
+Console error: `ResizeObserver loop completed with undelivered notifications`.
+
+Browser **bảo vệ** bằng cách defer notification sang next frame, nhưng
+loop logic vẫn fail. Pattern an toàn: chỉ đổi size **của element
+khác**, không phải target đang observe.
+
+```ts
+// ✅ observe A, đổi B
+new ResizeObserver(([entry]) => {
+  const w = entry.contentRect.width;
+  otherEl.style.width = w + 'px';
+}).observe(el);
+```
+
+Hoặc dùng flag để break loop:
+
+```ts
+let updating = false;
+new ResizeObserver(() => {
+  if (updating) return;
+  updating = true;
+  requestAnimationFrame(() => {
+    // update logic
+    updating = false;
+  });
+}).observe(el);
+```
+
+---
+
+## 5. IntersectionObserver advanced — beyond lazy load
+
+Lazy image + infinite scroll sentinel là use case basic. Phần này đi
+sâu hơn — pattern ít phổ biến nhưng cực kỳ hữu ích.
+
+### Threshold array — phân tầng visibility
+
+```ts
+const obs = new IntersectionObserver(
+  (entries) => {
+    for (const e of entries) {
+      console.log(`visible: ${(e.intersectionRatio * 100).toFixed(0)}%`);
+    }
+  },
+  { threshold: [0, 0.25, 0.5, 0.75, 1.0] }  // fire ở mỗi mốc
+);
+
+obs.observe(target);
+```
+
+Use case: **video auto-pause** khi < 50% visible, auto-play khi ≥ 75%.
+
+```ts
+new IntersectionObserver(
+  ([entry]) => {
+    if (entry.intersectionRatio >= 0.75) video.play();
+    else if (entry.intersectionRatio < 0.5) video.pause();
+  },
+  { threshold: [0.5, 0.75] }
+).observe(video);
+```
+
+### `rootMargin` — offset viewport ảo
+
+```ts
+// "Trigger 200px BEFORE element vào viewport thật"
+new IntersectionObserver(cb, { rootMargin: '200px 0px' }).observe(el);
+
+// "Element được coi là visible chỉ khi cách top 100px"
+// (hữu ích cho sticky header — ignore phần dưới sticky)
+new IntersectionObserver(cb, { rootMargin: '-100px 0px 0px 0px' });
+```
+
+Format: `top right bottom left` — như CSS margin.
+
+### Use case: scroll spy / table of contents
+
+Highlight TOC item của section đang visible:
+
+```ts
+const headings = document.querySelectorAll('h2[id]');
+const tocLinks = new Map<string, HTMLAnchorElement>();
+document.querySelectorAll('.toc a').forEach((a) => {
+  tocLinks.set((a as HTMLAnchorElement).hash.slice(1), a as HTMLAnchorElement);
+});
+
+const observer = new IntersectionObserver(
+  (entries) => {
+    for (const e of entries) {
+      const id = e.target.id;
+      const link = tocLinks.get(id);
+      if (!link) continue;
+      link.classList.toggle('active', e.isIntersecting);
+    }
+  },
+  {
+    // chỉ kích hoạt khi heading nằm trong band 0-30% viewport từ trên
+    rootMargin: '0px 0px -70% 0px',
+    threshold: 0,
+  }
+);
+
+headings.forEach((h) => observer.observe(h));
+```
+
+### Use case: analytics impression tracking
+
+Đo "user nhìn thấy ad/post bao lâu" — cần ≥ 50% pixel hiện ≥ 1 giây
+(IAB Viewable Impression standard):
+
+```ts
+function trackImpression(el: HTMLElement, onView: () => void) {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const obs = new IntersectionObserver(
+    ([entry]) => {
+      if (entry.intersectionRatio >= 0.5) {
+        timer = setTimeout(() => {
+          onView();
+          obs.disconnect();
+        }, 1000);
+      } else if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    },
+    { threshold: [0.5] }
+  );
+
+  obs.observe(el);
+  return () => {
+    if (timer) clearTimeout(timer);
+    obs.disconnect();
+  };
+}
+```
+
+### Use case: detect sticky element "stuck" state
+
+Khi header `position: sticky` đang stick (chạm top), thêm shadow.
+Detect bằng sentinel + IO:
+
+```html
+<div class="sentinel"></div>
+<header class="sticky-header"></header>
+```
+
+```css
+.sentinel {
+  position: absolute;
+  top: 0;
+  height: 1px;
+}
+.sticky-header {
+  position: sticky;
+  top: 0;
+}
+.sticky-header.is-stuck {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+```
+
+```ts
+const sentinel = document.querySelector('.sentinel')!;
+const header = document.querySelector('.sticky-header')!;
+
+new IntersectionObserver(
+  ([entry]) => {
+    header.classList.toggle('is-stuck', !entry.isIntersecting);
+  },
+  { threshold: [1] }
+).observe(sentinel);
+```
+
+Khi user scroll xuống → sentinel ra khỏi viewport → header "stuck".
+
+> Pattern này rất phổ biến — `position: sticky` không có pseudo-class
+> báo "đang stick", nên IO + sentinel là cách chuẩn.
+
+---
+
+## 6. PerformanceObserver — đo runtime production
+
+Performance metric trước đây phải poll qua `performance.getEntries()`.
+`PerformanceObserver` **push** entry mới ngay khi available — backbone
+của mọi RUM library (Vercel Speed Insights, Cloudflare RUM, custom).
+
+### Entry types đáng quan tâm
+
+| `entryType`                | Đo gì                                              |
+| -------------------------- | -------------------------------------------------- |
+| `navigation`               | Toàn bộ timing của page load                       |
+| `resource`                 | Mỗi asset (JS, CSS, image, fetch)                  |
+| `paint`                    | FP (first-paint), FCP (first-contentful-paint)     |
+| `largest-contentful-paint` | LCP — Web Vital chính                              |
+| `layout-shift`             | CLS — mỗi shift event                              |
+| `first-input`              | FID — first input delay (legacy)                   |
+| `event`                    | Mọi event với duration > threshold (cho INP)       |
+| `longtask`                 | Task > 50ms — main thread bị block                 |
+| `long-animation-frame`     | LoAF — replace longtask, chi tiết hơn (2024+)      |
+| `measure` / `mark`         | User Timing API                                    |
+| `element`                  | Element timing — assets you marked critical        |
+
+### Pattern chuẩn: report Web Vitals
+
+```ts
+function observe<T extends PerformanceEntry>(
+  type: string,
+  cb: (entries: T[]) => void
+) {
+  try {
+    const obs = new PerformanceObserver((list) => cb(list.getEntries() as T[]));
+    obs.observe({ type, buffered: true });
+    return obs;
+  } catch (e) {
+    // entryType không support → silently skip
+    return null;
+  }
+}
+
+// LCP: lấy cái CUỐI CÙNG (LCP có thể đổi nhiều lần)
+let lcp = 0;
+observe<LargestContentfulPaint>('largest-contentful-paint', (entries) => {
+  const last = entries[entries.length - 1];
+  lcp = last.renderTime || last.loadTime;
+});
+
+// CLS: cộng dồn các shift KHÔNG có recent input
+let cls = 0;
+observe<LayoutShift>('layout-shift', (entries) => {
+  for (const e of entries) {
+    if (!e.hadRecentInput) cls += e.value;
+  }
+});
+
+// LoAF: long animation frame — biết script nào block
+observe<PerformanceLongAnimationFrameTiming>('long-animation-frame', (entries) => {
+  for (const e of entries) {
+    if (e.duration > 100) {
+      console.warn('LoAF', e.duration, 'ms', e.scripts);
+    }
+  }
+});
+```
+
+> **`buffered: true` quan trọng**: nếu observer attach **sau** event
+> đã fire (ví dụ FCP đã xảy ra trước khi script chạy), browser vẫn
+> deliver entry đó từ buffer. Bỏ flag này = miss event sớm.
+
+### Send beacon khi unload
+
+```ts
+addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') {
+    navigator.sendBeacon('/rum', JSON.stringify({ lcp, cls }));
+  }
+});
+```
+
+`sendBeacon` không block unload, fire-and-forget — đúng cách báo
+metric cuối session.
+
+### Use case: log slow component
+
+```ts
+performance.mark('hero-start');
+renderHero();
+performance.mark('hero-end');
+performance.measure('hero-render', 'hero-start', 'hero-end');
+
+new PerformanceObserver((list) => {
+  for (const m of list.getEntries()) {
+    if (m.duration > 100) {
+      log.warn(`Slow render: ${m.name} ${m.duration}ms`);
+    }
+  }
+}).observe({ type: 'measure', buffered: true });
+```
+
+Hiện ngay trong DevTools Performance tab + auto-warn khi vượt budget.
+
+### Use case: detect 3rd-party tracker request
+
+```ts
+new PerformanceObserver((list) => {
+  for (const r of list.getEntries() as PerformanceResourceTiming[]) {
+    if (r.name.includes('google-analytics') || r.name.includes('facebook')) {
+      log.info(`tracker: ${r.name} ${r.duration.toFixed(0)}ms`);
+    }
+  }
+}).observe({ type: 'resource', buffered: true });
+```
+
+Tracker chậm là chuyện thường — biết để bàn với marketing.
+
+---
+
+## 7. ReportingObserver — bắt deprecation, CSP, intervention
+
+Ít ai biết tới observer này, nhưng nó vô giá cho health monitoring
+production. Browser sinh "report" khi:
+
+- Code dùng API **deprecated** (sắp bỏ).
+- Vi phạm **CSP** (Content Security Policy).
+- Browser **intervene** (auto-pause autoplay, throttle background).
+- Permissions policy violation.
+
+```ts
+if ('ReportingObserver' in window) {
+  const obs = new ReportingObserver(
+    (reports, observer) => {
+      for (const r of reports) {
+        log.warn('Browser report', r.type, r.body);
+        // Gửi về backend cho dashboard
+        fetch('/api/browser-report', {
+          method: 'POST',
+          body: JSON.stringify({ type: r.type, body: r.body, url: r.url }),
+        });
+      }
+    },
+    { buffered: true, types: ['deprecation', 'intervention'] }
+  );
+  obs.observe();
+}
+```
+
+### Report types
+
+| Type           | Khi nào fire                                      |
+| -------------- | ------------------------------------------------- |
+| `deprecation`  | Dùng API sắp removed (ví dụ `appCache`, `<keygen>`)|
+| `intervention` | Browser từ chối thực hiện (autoplay block, ...)   |
+| `crash`        | Tab/iframe crash                                  |
+| `csp-violation`| CSP block resource/inline script                  |
+
+### Use case: phát hiện deprecation trước EOL
+
+Bạn dùng polyfill có call API deprecated → user vẫn chạy nhưng sẽ
+broken khi browser bỏ. ReportingObserver báo trước hàng tháng.
+
+### Hỗ trợ
+
+Hiện tại Chrome/Edge support đầy đủ. Firefox/Safari hỗ trợ một phần
+qua HTTP `Report-To` / `Reporting-Endpoints` header. Production nên
+combine cả 2:
+
+```http
+Reporting-Endpoints: default="https://example.com/reports"
+Content-Security-Policy-Report-Only: default-src 'self'; report-to default
+```
+
+---
+
+## 8. So sánh — chọn observer nào cho vấn đề nào
+
+```text
+   "DOM tree thay đổi?"            → MutationObserver
+   "Element thay đổi kích thước?"  → ResizeObserver
+   "Element vào/ra viewport?"      → IntersectionObserver
+   "Performance metric mới?"       → PerformanceObserver
+   "Browser cảnh báo gì?"          → ReportingObserver
+```
+
+| Quan tâm                               | API tốt nhất             | Tránh dùng                        |
+| -------------------------------------- | ------------------------ | --------------------------------- |
+| Lazy load image                        | IntersectionObserver     | `scroll` event + `getBoundingRect`|
+| Element bị inject từ vendor            | MutationObserver         | `setInterval` + `querySelector`   |
+| Container resize (không phải viewport) | ResizeObserver           | `window.resize` (chỉ bắt viewport)|
+| Theme class change                     | MutationObserver         | Custom event bus                  |
+| Sticky stuck detection                 | IntersectionObserver     | `scroll` event                    |
+| LCP / CLS / INP                        | PerformanceObserver      | Polyfill cũ                       |
+| Auto-grow textarea                     | ResizeObserver + input   | Polling                           |
+| Wait for DOM trong test                | MutationObserver         | `setInterval`                     |
+| Detect autoplay block                  | ReportingObserver        | `play()` promise check (incomplete)|
+
+---
+
+## 9. Memory leak & cleanup — pattern chuẩn React
+
+Mọi observer giữ reference tới target. Quên `disconnect()` =
+**element không bao giờ được GC**, kể cả khi đã unmount.
+
+### Pattern React đúng
+
+```tsx
+function useMutationObserver(
+  ref: RefObject<HTMLElement>,
+  options: MutationObserverInit,
+  callback: MutationCallback
+) {
+  // Giữ callback ổn định bằng ref → tránh observe lại mỗi render
+  const callbackRef = useRef(callback);
+  useEffect(() => {
+    callbackRef.current = callback;
+  });
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const obs = new MutationObserver((m, o) => callbackRef.current(m, o));
+    obs.observe(el, options);
+    // ✅ MUST disconnect on unmount
+    return () => obs.disconnect();
+    // options serialize qua deps để re-observe nếu options thay đổi
+  }, [ref, JSON.stringify(options)]);
+}
+```
+
+### Pattern Vanilla / framework khác
+
+```ts
+class Component {
+  private observer: MutationObserver | null = null;
+
+  mount(el: HTMLElement) {
+    this.observer = new MutationObserver(this.onMutation);
+    this.observer.observe(el, { childList: true });
+  }
+
+  unmount() {
+    this.observer?.disconnect();
+    this.observer = null;
+  }
+
+  private onMutation = (records: MutationRecord[]) => {
+    // ...
+  };
+}
+```
+
+### Singleton observer cho nhiều target
+
+Nếu bạn observe **nhiều element cùng config**, không cần observer
+mới mỗi cái. ResizeObserver/IntersectionObserver design cho phép 1
+instance observe nhiều element:
+
+```ts
+const sharedObserver = new ResizeObserver((entries) => {
+  for (const e of entries) {
+    callbacks.get(e.target)?.(e);
+  }
+});
+
+const callbacks = new WeakMap<Element, (e: ResizeObserverEntry) => void>();
+
+export function observeResize(
+  el: Element,
+  cb: (e: ResizeObserverEntry) => void
+) {
+  callbacks.set(el, cb);
+  sharedObserver.observe(el);
+  return () => {
+    sharedObserver.unobserve(el);
+    callbacks.delete(el);
+  };
+}
+```
+
+`WeakMap` quan trọng — element được GC thì entry tự dọn. Nếu dùng
+`Map` thường, nó keep reference → leak.
+
+---
+
+## 10. Pitfalls thường gặp
+
+### `disconnect` không dọn pending records
+
+```ts
+obs.disconnect();
+// Nếu có mutation đã queue nhưng chưa fire → MẤT
+```
+
+Fix: `takeRecords()` trước:
+
+```ts
+const remaining = obs.takeRecords();
+processIfNeeded(remaining);
+obs.disconnect();
+```
+
+### Observer trong observer — vô tận
+
+```ts
+// ❌ MutationObserver callback đổi DOM → trigger MutationObserver tiếp
+const obs = new MutationObserver(() => {
+  document.body.appendChild(document.createElement('div'));
+});
+obs.observe(document.body, { childList: true });
+```
+
+Browser không infinite loop synchronously (do microtask schedule),
+nhưng tab vẫn freeze. Luôn check guard trong callback:
+
+```ts
+let handling = false;
+const obs = new MutationObserver(() => {
+  if (handling) return;
+  handling = true;
+  try {
+    // ...
+  } finally {
+    handling = false;
+  }
+});
+```
+
+### IntersectionObserver fire ngay khi observe
+
+Lần đầu `observe(el)`, IO **luôn fire callback** với current state —
+ngay cả khi target chưa đổi. Nếu bạn skip event đầu mặc định:
+
+```ts
+let initial = true;
+new IntersectionObserver((entries) => {
+  if (initial) {
+    initial = false;
+    return;
+  }
+  // logic thực
+}).observe(el);
+```
+
+### `entry.contentRect` đôi khi `0×0`
+
+Nếu element `display: none` hoặc chưa attach DOM, `contentRect` sẽ
+là `0×0`. Check trước khi xử lý:
+
+```ts
+new ResizeObserver(([e]) => {
+  if (e.contentRect.width === 0) return; // skip hidden
+  // ...
+}).observe(el);
+```
+
+### PerformanceObserver throw nếu entryType không support
+
+```ts
+// ❌ Safari < 14 không support 'longtask' → throw
+obs.observe({ type: 'longtask' });
+
+// ✅ try/catch
+try {
+  obs.observe({ type: 'longtask', buffered: true });
+} catch {}
+
+// ✅ hoặc check trước
+if (PerformanceObserver.supportedEntryTypes?.includes('longtask')) {
+  obs.observe({ type: 'longtask' });
+}
+```
+
+### `buffered: true` chỉ work với entryType single
+
+```ts
+// ❌ Mix entryTypes + buffered → throw
+obs.observe({ entryTypes: ['paint', 'longtask'], buffered: true });
+
+// ✅ Tách thành 2 observer hoặc 2 lần observe
+obs.observe({ type: 'paint', buffered: true });
+obs.observe({ type: 'longtask', buffered: true });
+```
+
+---
+
+## 11. Custom Observer — pattern tự xây
+
+Khi không có Observer API native cho thứ bạn quan tâm, tự xây theo
+cùng pattern:
+
+```ts
+class ScrollDirectionObserver {
+  private callbacks = new Set<(dir: 'up' | 'down') => void>();
+  private lastY = 0;
+  private rafId: number | null = null;
+  private attached = false;
+
+  observe(cb: (dir: 'up' | 'down') => void) {
+    this.callbacks.add(cb);
+    if (!this.attached) this.attach();
+    return () => this.unobserve(cb);
+  }
+
+  unobserve(cb: (dir: 'up' | 'down') => void) {
+    this.callbacks.delete(cb);
+    if (this.callbacks.size === 0) this.detach();
+  }
+
+  disconnect() {
+    this.callbacks.clear();
+    this.detach();
+  }
+
+  private attach() {
+    this.attached = true;
+    this.lastY = window.scrollY;
+    window.addEventListener('scroll', this.onScroll, { passive: true });
+  }
+
+  private detach() {
+    this.attached = false;
+    window.removeEventListener('scroll', this.onScroll);
+    if (this.rafId) cancelAnimationFrame(this.rafId);
+  }
+
+  private onScroll = () => {
+    if (this.rafId) return;          // throttle qua RAF
+    this.rafId = requestAnimationFrame(() => {
+      const y = window.scrollY;
+      const dir = y > this.lastY ? 'down' : 'up';
+      this.lastY = y;
+      this.rafId = null;
+      this.callbacks.forEach((cb) => cb(dir));
+    });
+  };
+}
+
+// Usage
+const observer = new ScrollDirectionObserver();
+const stop = observer.observe((dir) => console.log(dir));
+// later: stop()
+```
+
+### Đặc điểm pattern observer chuẩn
+
+1. `observe(target, callback)` trả về **unsubscribe function**.
+2. Nội bộ throttle qua RAF / microtask — không fire mỗi event raw.
+3. Auto attach listener khi có ít nhất 1 subscriber, detach khi
+   count về 0 (lazy resource).
+4. `disconnect()` dọn toàn bộ.
+5. Dùng `WeakMap`/`WeakSet` nếu reference target — không leak.
+
+Đây cũng là cách **Zustand**, **TanStack Store**, **Jotai** internal
+implement reactive state.
+
+---
+
+## 12. Checklist
+
+### Khi dùng MutationObserver
+
+- [ ] Scope hẹp nhất có thể — chỉ subtree, attribute, hoặc filter cần
+- [ ] `attributeFilter` thay vì observe all attributes
+- [ ] `disconnect()` ngay khi đã tìm thấy target (one-shot pattern)
+- [ ] Guard infinite loop nếu callback đổi DOM
+- [ ] `takeRecords()` trước `disconnect()` nếu cần flush pending
+
+### Khi dùng ResizeObserver
+
+- [ ] Không đổi size của target trong callback (loop)
+- [ ] Dùng `borderBoxSize` thay `contentRect` cho HiDPI canvas
+- [ ] 1 observer instance cho nhiều element thay vì N instance
+- [ ] Skip khi `width === 0` (hidden element)
+
+### Khi dùng IntersectionObserver
+
+- [ ] `rootMargin` dương cho prefetch, âm cho "must be deeply visible"
+- [ ] Threshold array cho phân tầng (impression tracking)
+- [ ] `disconnect()` sau khi event đầu nếu là one-shot (lazy load)
+- [ ] Skip event đầu nếu logic cần "real change"
+
+### Khi dùng PerformanceObserver
+
+- [ ] `buffered: true` để bắt entry trước khi observer attach
+- [ ] Try/catch hoặc `supportedEntryTypes` check
+- [ ] Send qua `sendBeacon` ở `visibilitychange = hidden`
+- [ ] Tách nhiều `observe()` call cho nhiều entryType
+
+### Cleanup chung
+
+- [ ] `useEffect` return luôn có `obs.disconnect()`
+- [ ] Singleton observer + WeakMap callback cho lib reusable
+- [ ] Test memory leak với DevTools Memory tab (Detached HTMLElement)
+
+---
+
+## Tóm tắt
+
+| Observer              | Vấn đề giải quyết               | Effort | Hiệu năng     |
+| --------------------- | ------------------------------- | ------ | ------------- |
+| `MutationObserver`    | DOM thay đổi runtime            | Thấp   | Cực cao       |
+| `ResizeObserver`      | Element resize (mọi nguyên nhân)| Thấp   | Cao           |
+| `IntersectionObserver`| Element vào/ra viewport         | Thấp   | Cực cao       |
+| `PerformanceObserver` | Đo runtime production           | Trung  | Cao           |
+| `ReportingObserver`   | Browser violations              | Thấp   | Cao           |
+
+> **Quy tắc**: thấy mình viết `setInterval`, `scroll`/`resize` listener
+> với `getBoundingRect()`, hoặc loop polling — dừng lại, gần như chắc
+> chắn có Observer thay thế. Pattern phẳng, async, batched, off-main-thread
+> — đó là cả lý do family này tồn tại.
+
+Observer pattern không phải "advanced JS" — nó là **default tool**
+để xử lý sự kiện ngầm trong browser modern. Nắm 5 API trên là đủ
+giải quyết 80%+ vấn đề "tôi muốn biết khi X thay đổi" mà không cần
+Redux store hay event bus tự build.
+
+---
+
+## Nguồn tham khảo
+
+- [MDN — MutationObserver](https://developer.mozilla.org/en-US/docs/Web/API/MutationObserver)
+- [MDN — ResizeObserver](https://developer.mozilla.org/en-US/docs/Web/API/ResizeObserver)
+- [MDN — IntersectionObserver](https://developer.mozilla.org/en-US/docs/Web/API/Intersection_Observer_API)
+- [MDN — PerformanceObserver](https://developer.mozilla.org/en-US/docs/Web/API/PerformanceObserver)
+- [MDN — ReportingObserver](https://developer.mozilla.org/en-US/docs/Web/API/ReportingObserver)
+- [web.dev — Web Vitals library source](https://github.com/GoogleChrome/web-vitals)
+- [web.dev — Long Animation Frames API](https://web.dev/articles/long-animation-frames)
+- [WICG — Element Timing](https://wicg.github.io/element-timing/)
+- [Chrome Status — ReportingObserver](https://chromestatus.com/feature/4691191559880704)
+- [Surma — ResizeObserver loop limit explained](https://web.dev/articles/resize-observer)

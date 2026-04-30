@@ -1,0 +1,1207 @@
+---
+title: 'Infinite scroll & Virtual scroll — deep dive từ IntersectionObserver tới windowing'
+description: 'Đào sâu cách render danh sách dài: pagination vs infinite scroll vs virtual scroll, sentinel pattern với IntersectionObserver, fixed/variable-height windowing, bidirectional list (chat, feed), và mọi pitfall production.'
+pubDate: 2026-04-30
+tags: [performance, frontend, react, scroll, web-vitals]
+draft: false
+---
+
+Render một danh sách 50 item là chuyện vặt. Render 50 nghìn item mà
+không khiến browser bốc khói lại là một bài toán hoàn toàn khác — và
+đó là lúc **infinite scroll** và **virtual scroll** bước vào.
+
+Hai kỹ thuật này thường bị nhầm lẫn nhưng giải quyết 2 vấn đề khác
+nhau: **infinite scroll** trả lời câu hỏi *"khi nào tải thêm data?"*,
+còn **virtual scroll** (a.k.a. *windowing*) trả lời *"render bao nhiêu
+DOM node mới đủ?"*. Một site dài có thể cần cả hai, không có là tự
+sát performance.
+
+Bài này đi từ tầng ý niệm — *spectrum giữa pagination ↔ infinite ↔
+virtual* — xuống cụ thể implementation, thư viện thực chiến, và
+checklist mà tôi từng dán vào commit message khi review PR.
+
+---
+
+## Mục lục
+
+1. [Spectrum: pagination ↔ infinite ↔ virtual](#1-spectrum-pagination--infinite--virtual)
+2. [Infinite scroll — sentinel pattern với IntersectionObserver](#2-infinite-scroll--sentinel-pattern-với-intersectionobserver)
+3. [Cursor vs offset — chọn đúng pagination](#3-cursor-vs-offset--chọn-đúng-pagination)
+4. [Virtual scroll — vì sao DOM khổng lồ giết browser](#4-virtual-scroll--vì-sao-dom-khổng-lồ-giết-browser)
+5. [Fixed-height windowing — implementation tay](#5-fixed-height-windowing--implementation-tay)
+6. [Variable-height — đo, đoán, đo lại](#6-variable-height--đo-đoán-đo-lại)
+7. [Bidirectional & reverse scroll (chat, feed)](#7-bidirectional--reverse-scroll-chat-feed)
+8. [Thư viện thực chiến — react-window, TanStack Virtual, Virtua](#8-thư-viện-thực-chiến--react-window-tanstack-virtual-virtua)
+9. [CSS-only techniques: `content-visibility` & `contain`](#9-css-only-techniques-content-visibility--contain)
+10. [Image & embed trong danh sách dài](#10-image--embed-trong-danh-sách-dài)
+11. [Restore scroll position — back button không nhảy](#11-restore-scroll-position--back-button-không-nhảy)
+12. [SEO & accessibility — chỗ infinite scroll hay sai](#12-seo--accessibility--chỗ-infinite-scroll-hay-sai)
+13. [Pitfalls thường gặp trong production](#13-pitfalls-thường-gặp-trong-production)
+14. [Checklist](#14-checklist)
+
+---
+
+## 1. Spectrum: pagination ↔ infinite ↔ virtual
+
+3 chiến lược, 3 vấn đề khác nhau:
+
+```text
+   ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────┐
+   │   Pagination    │   │ Infinite Scroll │   │ Virtual Scroll  │
+   │  (page 1, 2…)   │   │  (auto load)    │   │  (windowing)    │
+   ├─────────────────┤   ├─────────────────┤   ├─────────────────┤
+   │ Khi nào tải?    │   │ Khi nào tải?    │   │ Khi nào tải?    │
+   │  — user click   │   │  — gần cuối     │   │  — bất kỳ chiến  │
+   │                 │   │    viewport     │   │    lược nào     │
+   ├─────────────────┤   ├─────────────────┤   ├─────────────────┤
+   │ Render bao nhiêu?│  │ Render bao nhiêu?│  │ Render bao nhiêu?│
+   │  — 1 page       │   │  — TẤT CẢ đã    │   │  — chỉ phần     │
+   │                 │   │    fetch        │   │    visible      │
+   └─────────────────┘   └─────────────────┘   └─────────────────┘
+                          ▲                       ▲
+                          │                       │
+                          └───── kết hợp được ────┘
+                          infinite fetch + virtual render
+                          = giải pháp scale tới triệu item
+```
+
+### Khi nào dùng cái nào
+
+| Use case                       | Pagination | Infinite | Virtual | Cả hai infinite + virtual |
+| ------------------------------ | :--------: | :------: | :-----: | :-----------------------: |
+| Search result (Google)         |     ✓      |          |         |                           |
+| Admin table (data dense)       |     ✓      |          |    ✓    |                           |
+| Social feed (Twitter, FB)      |            |    ✓     |         |             ✓             |
+| Chat (Slack, Discord)          |            |    ✓     |         |             ✓             |
+| Infinite gallery (Pinterest)   |            |    ✓     |         |             ✓             |
+| Spreadsheet (Google Sheets)    |            |          |    ✓    |                           |
+| Log viewer 100k+ rows          |            |          |    ✓    |                           |
+| Long form blog post            |            |          |    ✓    |                           |
+
+> **Quy tắc rất thực dụng**: < 100 item → đừng over-engineer, render
+> hết. 100-1000 → cân nhắc virtual nếu mỗi item nặng (image, video).
+> > 1000 → bắt buộc virtual. Cộng infinite scroll khi data có thể
+> bao la không biết tổng.
+
+---
+
+## 2. Infinite scroll — sentinel pattern với IntersectionObserver
+
+Cách "cũ" của infinite scroll là listen `scroll` event, đo
+`scrollTop + clientHeight >= scrollHeight - threshold`. Cách này 3
+nhược điểm:
+
+- `scroll` event firing 60-120 lần/giây → main thread bận.
+- Mỗi handler đọc geometry → **forced layout** (xem bài [tối ưu CSS](/blog/css-performance-deep-dive)).
+- Phải debounce/throttle thủ công, dễ sai threshold.
+
+Cách "đúng" hiện đại là **sentinel + IntersectionObserver**: đặt 1
+phần tử ẩn ở cuối list, browser tự báo khi nó lọt vào viewport.
+
+```text
+     ┌──────────── viewport ────────────┐
+     │  item 1                          │
+     │  item 2                          │
+     │  ...                             │
+     │  item N (cuối list hiện có)      │
+     ├──────────────────────────────────┤
+     │         ▼ sentinel ▼             │  ◄── lọt viewport → fetch tiếp
+     └──────────────────────────────────┘
+```
+
+### Implementation tay
+
+```ts
+function useInfiniteScroll<T>(
+  fetchPage: (cursor: string | null) => Promise<{ items: T[]; nextCursor: string | null }>
+) {
+  const [items, setItems] = useState<T[]>([]);
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+
+  // Trigger load ngay khi sentinel cách viewport 400px → user
+  // không bao giờ cảm thấy khoảng trắng chờ.
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el || done) return;
+
+    const io = new IntersectionObserver(
+      async ([entry]) => {
+        if (!entry.isIntersecting || loading) return;
+        setLoading(true);
+        const page = await fetchPage(cursor);
+        setItems((prev) => [...prev, ...page.items]);
+        setCursor(page.nextCursor);
+        if (!page.nextCursor) setDone(true);
+        setLoading(false);
+      },
+      { rootMargin: '400px' }
+    );
+
+    io.observe(el);
+    return () => io.disconnect();
+  }, [cursor, done, loading, fetchPage]);
+
+  return { items, sentinelRef, loading, done };
+}
+```
+
+```tsx
+function Feed() {
+  const { items, sentinelRef, loading, done } = useInfiniteScroll(fetchFeedPage);
+
+  return (
+    <ul>
+      {items.map((it) => (
+        <FeedItem key={it.id} item={it} />
+      ))}
+      {!done && <li ref={sentinelRef} aria-hidden style={{ height: 1 }} />}
+      {loading && <Spinner />}
+    </ul>
+  );
+}
+```
+
+### Vì sao `rootMargin: '400px'`?
+
+```text
+                                     fetch fired here ─┐
+                                                       ▼
+   ┌── viewport ──┐                              ┌──────────┐
+   │              │                              │ sentinel │
+   │              │                              └──────────┘
+   │              │                              ▲          ▲
+   │              │                              └──400px──┘
+   └──────────────┘
+                                                            ▲
+                                                            │
+                                                user thấy spinner ngay khi
+                                                tiếp cận đáy → 0 khoảng trắng
+```
+
+Network có round-trip 200-500ms. Bắt đầu fetch sớm 400px = user
+cuộn tới nơi thì data đã về. Chỉnh số này theo tốc độ scroll trung
+bình của user và RTT thực tế.
+
+### Anti-pattern: Observer trên mỗi item
+
+```ts
+// ❌ tạo IO observer cho TỪNG item — 1000 item = 1000 observer
+items.map((item, i) => (
+  <Item ref={(el) => observer.observe(el!)} key={item.id} />
+));
+
+// ✅ 1 observer duy nhất cho 1 sentinel
+<div ref={sentinelRef} />
+```
+
+IntersectionObserver rất rẻ, nhưng tạo hàng nghìn instance vẫn lãng
+phí. Một sentinel duy nhất là đủ cho infinite scroll.
+
+---
+
+## 3. Cursor vs offset — chọn đúng pagination
+
+Backend pagination ảnh hưởng trực tiếp tới UX infinite scroll. 2 pattern:
+
+### Offset-based (`?page=3&size=20`)
+
+```sql
+SELECT * FROM posts ORDER BY created_at DESC LIMIT 20 OFFSET 60;
+```
+
+Ưu: dễ implement, có thể nhảy tới page bất kỳ.
+
+Nhược **fatal cho infinite scroll**:
+
+- **Skip/duplicate khi data thay đổi**: user đang ở page 3, có post
+  mới insert → page 4 trùng item của page 3.
+- **Slow ở page sâu**: `OFFSET 100000` buộc DB scan và discard
+  100k row.
+
+```text
+   t=0:                       t=1: (1 post mới insert)
+   ┌──────────┐               ┌──────────┐
+   │ post 100 │ ← offset 0    │ post 101 │ ← post mới
+   │ ...      │               │ post 100 │
+   │ post 81  │ ← offset 19   │ post 99  │
+   ├──────────┤               │ ...      │
+   │ post 80  │ ← offset 20   │ post 81  │ ← lẽ ra ở page 1
+   │ ...      │               ├──────────┤
+   │ post 61  │               │ post 80  │ ← user thấy lần 2!
+   └──────────┘               └──────────┘
+```
+
+### Cursor-based (`?after=eyJpZCI6...`)
+
+```sql
+SELECT * FROM posts
+WHERE created_at < $cursor_created_at
+ORDER BY created_at DESC LIMIT 20;
+```
+
+Ưu:
+- **Stable**: không skip/duplicate dù data đổi liên tục.
+- **Fast**: index `created_at` → O(log n) regardless of depth.
+- **Opaque**: encode cursor (base64 JSON) → backend đổi schema không
+  break client.
+
+Nhược: không nhảy tới "page 50" được — phải đi tuần tự.
+
+> Với infinite scroll: **luôn dùng cursor**. Offset chỉ phù hợp với
+> pagination truyền thống có UI số trang.
+
+### React Query / SWR pattern
+
+```ts
+const {
+  data,
+  fetchNextPage,
+  hasNextPage,
+  isFetchingNextPage,
+} = useInfiniteQuery({
+  queryKey: ['feed'],
+  queryFn: ({ pageParam }) => fetchFeed({ cursor: pageParam }),
+  initialPageParam: null as string | null,
+  getNextPageParam: (last) => last.nextCursor,
+});
+
+const items = data?.pages.flatMap((p) => p.items) ?? [];
+```
+
+`useInfiniteQuery` lo cả cache, dedupe, retry, và background refetch.
+Tự viết hook chỉ nên làm khi không có TanStack/SWR.
+
+---
+
+## 4. Virtual scroll — vì sao DOM khổng lồ giết browser
+
+Mỗi DOM node đều có cost:
+
+| Cost                  | Ảnh hưởng                                         |
+| --------------------- | ------------------------------------------------- |
+| Memory                | ~1-2KB/element + style + layout box               |
+| Style recalculation   | Tỷ lệ tuyến tính với số node                       |
+| Layout                | Có thể tăng phi tuyến nếu layout phức tạp         |
+| Paint                 | Tỷ lệ với pixel area, không phải số node          |
+| GC pressure           | Tạo & xoá DOM = pressure cho V8 GC                |
+
+Số liệu thực tế trên MacBook Pro M-series, list 10k row đơn giản:
+
+```text
+                   1k items   10k items   50k items
+   DOM memory:      ~2 MB     ~22 MB      ~110 MB
+   Initial render:  ~50ms     ~600ms      ~3500ms
+   Scroll FPS:       60        ~30         <10
+   Memory in tab:   ~80MB     ~250MB      ~800MB+
+```
+
+Mobile mid-range: nhân 3-5 lần. **Không có cách nào** tối ưu CSS đủ
+để fix list 50k DOM node — phải **không render** chúng.
+
+### Virtual scroll concept
+
+Ý tưởng cốt lõi: **DOM chỉ chứa item visible + buffer**, phần còn
+lại được "giả lập" bằng spacer phía trên/dưới:
+
+```text
+   ┌──── container (overflow: auto, fixed height) ────┐
+   │  ┌─────────────────────────────────────────┐    │
+   │  │  spacer top (height = N items above)     │    │
+   │  │  ▲                                       │    │
+   │  │  │                                       │    │
+   │  │  └─ DOM thực sự không có node            │    │
+   │  └─────────────────────────────────────────┘    │
+   │  ┌─────────────────────────────────────────┐    │
+   │  │  visible item N                          │    │
+   │  │  visible item N+1                        │    │ ← chỉ phần này
+   │  │  ...                                     │    │   thật sự có DOM
+   │  │  visible item N+10                       │    │
+   │  └─────────────────────────────────────────┘    │
+   │  ┌─────────────────────────────────────────┐    │
+   │  │  spacer bottom (height = M items below)  │    │
+   │  └─────────────────────────────────────────┘    │
+   └──────────────────────────────────────────────────┘
+```
+
+Hai spacer giả lập tổng chiều cao → scrollbar trông đúng. Chỉ items
+visible thật sự được mount → DOM nhẹ tênh.
+
+**Mọi virtual scroll lib trên đời đều dùng pattern này** — khác nhau
+ở cách đo height, cách quản state visible range, và cách handle
+variable height.
+
+---
+
+## 5. Fixed-height windowing — implementation tay
+
+Khi mọi item cao đúng bằng nhau, virtual scroll cực đơn giản:
+
+```tsx
+function FixedVirtualList<T>({
+  items,
+  itemHeight,
+  containerHeight,
+  renderItem,
+  overscan = 5,
+}: {
+  items: T[];
+  itemHeight: number;
+  containerHeight: number;
+  renderItem: (item: T, index: number) => React.ReactNode;
+  overscan?: number;
+}) {
+  const [scrollTop, setScrollTop] = useState(0);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  const totalHeight = items.length * itemHeight;
+
+  // Khoảng index đang visible + overscan để giảm flash khi scroll nhanh
+  const startIndex = Math.max(
+    0,
+    Math.floor(scrollTop / itemHeight) - overscan
+  );
+  const endIndex = Math.min(
+    items.length,
+    Math.ceil((scrollTop + containerHeight) / itemHeight) + overscan
+  );
+
+  const visibleItems = items.slice(startIndex, endIndex);
+  const offsetY = startIndex * itemHeight;
+
+  return (
+    <div
+      ref={containerRef}
+      onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+      style={{
+        height: containerHeight,
+        overflow: 'auto',
+        contain: 'strict',
+      }}
+    >
+      {/* spacer giữ tổng height đúng */}
+      <div style={{ height: totalHeight, position: 'relative' }}>
+        {/* render dùng transform thay vì top → chỉ composite, không layout */}
+        <div
+          style={{
+            transform: `translateY(${offsetY}px)`,
+            willChange: 'transform',
+          }}
+        >
+          {visibleItems.map((item, i) =>
+            renderItem(item, startIndex + i)
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+3 chi tiết quan trọng:
+
+- **`overscan`**: render thêm vài item ngoài viewport. 0 = scroll
+  nhanh thấy flash trắng. Quá nhiều = lãng phí. 3-10 thường tối ưu.
+- **`transform: translateY`** thay vì `top`: chỉ composite, không
+  layout. Khác biệt 30-50% FPS khi scroll nhanh.
+- **`contain: strict`** trên container: cô lập layout/paint, browser
+  không reflow ngoài (xem [bài CSS perf](/blog/css-performance-deep-dive)).
+
+### Throttle scroll — có cần không?
+
+`onScroll` fire ~120 lần/s trên 120Hz display. Nhưng nếu handler chỉ
+`setState(scrollTop)` thì React 18 batch và `requestAnimationFrame`
+schedule — không cần throttle thủ công.
+
+Throttle chỉ cần khi handler làm việc nặng (gọi API, lookup data).
+Pattern: `useTransition` cho state update không cần ngay:
+
+```ts
+const [scrollTop, setScrollTop] = useState(0);
+const [, startTransition] = useTransition();
+
+const onScroll = (e: React.UIEvent<HTMLDivElement>) => {
+  const top = e.currentTarget.scrollTop;
+  startTransition(() => setScrollTop(top));
+};
+```
+
+---
+
+## 6. Variable-height — đo, đoán, đo lại
+
+Đời thực hiếm khi mọi item cao bằng nhau: text dài ngắn khác nhau,
+ảnh có/không, embed video. Variable-height virtual scroll khó hơn
+nhiều vì:
+
+- Không biết tổng chiều cao trước khi đo.
+- Scrollbar phải tracking đúng → cần estimate.
+- Item có thể đổi height runtime (image load xong, expand text).
+
+### Chiến lược 3 bước
+
+```text
+   1. ESTIMATE
+      Mọi item chưa đo có default height (ví dụ 80px).
+      Tổng = sum estimate ban đầu.
+
+   2. MEASURE on render
+      Sau khi item render → ResizeObserver đo height thực.
+      Lưu vào cache theo key (id).
+
+   3. RECONCILE
+      Tính lại offsets dựa trên measured + estimated.
+      Cập nhật scrollHeight & visible range.
+```
+
+### Implementation skeleton
+
+```ts
+type SizeCache = Map<string, number>;
+
+function useDynamicSize(estimateSize: number) {
+  const cache = useRef<SizeCache>(new Map());
+  const [, forceUpdate] = useReducer((x) => x + 1, 0);
+
+  const observer = useMemo(
+    () =>
+      new ResizeObserver((entries) => {
+        let changed = false;
+        for (const entry of entries) {
+          const id = (entry.target as HTMLElement).dataset.id!;
+          const h = entry.contentRect.height;
+          if (cache.current.get(id) !== h) {
+            cache.current.set(id, h);
+            changed = true;
+          }
+        }
+        // Batch update — tránh storm khi 50 item resize cùng frame
+        if (changed) requestAnimationFrame(forceUpdate);
+      }),
+    []
+  );
+
+  const observe = useCallback(
+    (el: HTMLElement | null) => {
+      if (el) observer.observe(el);
+    },
+    [observer]
+  );
+
+  const getSize = (id: string) => cache.current.get(id) ?? estimateSize;
+
+  return { observe, getSize };
+}
+```
+
+```tsx
+{visibleItems.map((item) => (
+  <div
+    key={item.id}
+    data-id={item.id}
+    ref={observe}
+  >
+    <Item data={item} />
+  </div>
+))}
+```
+
+### Chuẩn hoá: prefix sum cho fast lookup
+
+Tính offset của item N = sum(height của 0..N-1). Naive là O(N) mỗi
+lần scroll. Dùng **Fenwick tree** (Binary Indexed Tree) hoặc skip
+list để lookup O(log N):
+
+```ts
+class HeightIndex {
+  private tree: number[];
+  constructor(size: number, defaultHeight: number) {
+    this.tree = new Array(size + 1).fill(0);
+    for (let i = 1; i <= size; i++) this.update(i, defaultHeight);
+  }
+  update(i: number, delta: number) {
+    while (i < this.tree.length) {
+      this.tree[i] += delta;
+      i += i & -i;
+    }
+  }
+  // Tổng height từ 0 tới i (exclusive)
+  prefix(i: number): number {
+    let sum = 0;
+    while (i > 0) {
+      sum += this.tree[i];
+      i -= i & -i;
+    }
+    return sum;
+  }
+}
+```
+
+Đa số người không cần tự code — TanStack Virtual và Virtua đã làm
+sẵn. Nhưng hiểu để chọn lib đúng.
+
+### Layout shift khi item resize
+
+Khi item lớn hơn estimate, scrollbar nhảy:
+
+```text
+   user đang ở giữa list ───►   image #50 load xong (+200px)
+                                 ▼
+   tất cả item dưới #50 dịch xuống 200px
+   user thấy nội dung đang đọc nhảy → trải nghiệm xấu
+```
+
+Fix:
+
+- **Reserve size**: dùng `aspect-ratio` hoặc fixed height cho image
+  → tránh resize sau load.
+- **Anchor scroll**: nếu resize xảy ra **trên** vị trí scroll hiện
+  tại, bù `scrollTop` để giữ visual ổn định:
+
+```ts
+if (resizedItemY < scrollTop) {
+  container.scrollTop += deltaHeight;
+}
+```
+
+CSS Anchor `overflow-anchor: auto` (default) đã làm việc này tự
+động ở browser modern, nhưng virtual scroll thường disable vì lib
+tự quản scroll → cần tự reimplement.
+
+---
+
+## 7. Bidirectional & reverse scroll (chat, feed)
+
+Chat (Slack, Discord, iMessage) là case khó nhất:
+
+- Render từ dưới lên (mới nhất ở đáy).
+- Load thêm khi scroll **lên** (lịch sử cũ).
+- New message append ở dưới — phải auto-scroll **chỉ khi** đang ở đáy.
+- User scroll lên đọc lịch sử + có message mới → **không** được nhảy.
+
+```text
+   ┌──── chat container ────┐
+   │ msg #50 (cũ nhất hiện) │ ← load thêm khi scroll lên
+   │ ...                    │
+   │ msg #95                │
+   │ msg #96                │ ← visible
+   │ msg #97                │ ← visible
+   │ msg #98 (mới nhất)     │ ← visible, auto-scroll vào đây nếu user
+   └────────────────────────┘    đang ở "stick to bottom"
+```
+
+### Pattern "stick to bottom"
+
+```ts
+function useStickBottom(ref: RefObject<HTMLElement>, threshold = 50) {
+  const [stuck, setStuck] = useState(true);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const onScroll = () => {
+      const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+      setStuck(distance < threshold);
+    };
+    el.addEventListener('scroll', onScroll);
+    return () => el.removeEventListener('scroll', onScroll);
+  }, [ref]);
+
+  return stuck;
+}
+```
+
+Khi message mới đến:
+
+```ts
+useEffect(() => {
+  if (!stuck) {
+    // user đang đọc lịch sử → KHÔNG scroll, hiện badge "1 new message"
+    setHasNewMessage(true);
+    return;
+  }
+  // đang ở đáy → tự scroll xuống message mới
+  containerRef.current?.scrollTo({
+    top: containerRef.current.scrollHeight,
+    behavior: 'smooth',
+  });
+}, [messages.length, stuck]);
+```
+
+### CSS hack `flex-direction: column-reverse`
+
+```css
+.chat {
+  display: flex;
+  flex-direction: column-reverse;
+  overflow-y: auto;
+}
+```
+
+Reverse layout làm browser tự render từ dưới lên: `scrollTop = 0`
+ở đáy. New message append đầu DOM nhưng visual ở đáy. Đẹp về lý
+thuyết nhưng:
+
+- Wheel/touch direction đảo trên một số browser.
+- Screen reader đọc ngược thứ tự.
+- IntersectionObserver `rootMargin` cũng đảo.
+
+Dùng cẩn thận. Phương án "imperative scroll" như trên thường robust
+hơn.
+
+### Anchor khi prepend lịch sử
+
+User scroll lên → fetch 50 message cũ → prepend đầu DOM. Nếu không
+xử lý, **toàn bộ list nhảy xuống 50 item** vì scrollTop giữ nguyên
+nhưng content tăng lên.
+
+```ts
+const before = container.scrollHeight;
+prependMessages(olderMessages);
+// Sau khi DOM update, bù scrollTop bằng delta height
+requestAnimationFrame(() => {
+  const after = container.scrollHeight;
+  container.scrollTop += after - before;
+});
+```
+
+Browser modern có `scroll-anchoring` tự handle, nhưng virtual list
+thường disable nó. Phải tự bù.
+
+---
+
+## 8. Thư viện thực chiến — react-window, TanStack Virtual, Virtua
+
+| Lib                  | Bundle  | Variable height | Bidirectional | DX        | Khi nào chọn               |
+| -------------------- | ------- | --------------- | ------------- | --------- | -------------------------- |
+| **react-window**     | ~6KB    | Có (FixedSize/VariableSize) | OK    | Đơn giản  | List đơn giản, fixed-height |
+| **react-virtuoso**   | ~25KB   | Tự động đo       | Tốt           | Cao cấp   | Chat, feed, complex        |
+| **TanStack Virtual** | ~5KB    | Tốt              | Tốt           | Headless  | Cần custom UI hoàn toàn     |
+| **Virtua**           | ~3KB    | Auto-measure     | Tốt           | Hiện đại  | New project, perf-first    |
+
+### TanStack Virtual — pattern hiện đại
+
+Headless = cho bạn data (offset, size) + ref, bạn render bất kỳ JSX nào:
+
+```tsx
+import { useVirtualizer } from '@tanstack/react-virtual';
+
+function Feed({ items }: { items: Item[] }) {
+  const parentRef = useRef<HTMLDivElement>(null);
+
+  const virt = useVirtualizer({
+    count: items.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 80,
+    overscan: 5,
+    measureElement: (el) => el?.getBoundingClientRect().height ?? 80,
+  });
+
+  return (
+    <div
+      ref={parentRef}
+      style={{ height: 600, overflow: 'auto', contain: 'strict' }}
+    >
+      <div
+        style={{
+          height: virt.getTotalSize(),
+          width: '100%',
+          position: 'relative',
+        }}
+      >
+        {virt.getVirtualItems().map((vRow) => (
+          <div
+            key={vRow.key}
+            data-index={vRow.index}
+            ref={virt.measureElement}
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              width: '100%',
+              transform: `translateY(${vRow.start}px)`,
+            }}
+          >
+            <FeedItem item={items[vRow.index]} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+```
+
+Kết hợp với `useInfiniteQuery` cho infinite + virtual:
+
+```ts
+useEffect(() => {
+  const last = virt.getVirtualItems().at(-1);
+  if (!last) return;
+  if (last.index >= items.length - 5 && hasNextPage) {
+    fetchNextPage();
+  }
+}, [virt.getVirtualItems(), items.length]);
+```
+
+### Virtua — newcomer perf-first
+
+```tsx
+import { Virtualizer } from 'virtua';
+
+<div style={{ height: 600, overflowY: 'auto' }}>
+  <Virtualizer overscan={5}>
+    {items.map((it) => <FeedItem key={it.id} item={it} />)}
+  </Virtualizer>
+</div>;
+```
+
+Auto-measure, không cần `estimateSize`, no layout shift khi item
+resize. Nếu start project mới, đáng cân nhắc.
+
+### Khi nào tự code
+
+Hầu như không bao giờ. Chỉ khi:
+- Constraint bundle size cực kỳ ngặt (< 1KB).
+- Logic scroll exotic mà lib không cover (ví dụ horizontal masonry).
+
+Các case còn lại — lib làm tốt hơn, edge case nhiều hơn, perf tốt hơn.
+
+---
+
+## 9. CSS-only techniques: `content-visibility` & `contain`
+
+Trước khi reach thư viện virtual scroll, có 2 CSS property gần như
+miễn phí:
+
+### `content-visibility: auto`
+
+Browser tự skip layout/paint cho item ngoài viewport — gần như
+"virtual scroll bằng CSS":
+
+```css
+.feed-item {
+  content-visibility: auto;
+  contain-intrinsic-size: 0 200px;
+}
+```
+
+- `contain-intrinsic-size`: kích thước placeholder khi chưa render.
+  Sai số quá lớn → CLS, scrollbar nhảy.
+
+| Tier              | Kỹ thuật                          | Hiệu quả                       |
+| ----------------- | --------------------------------- | ------------------------------ |
+| < 100 item        | render hết                        | OK                             |
+| 100-1000 item     | `content-visibility: auto`        | Đủ cho hầu hết case            |
+| 1000-10k item     | virtual scroll (lib)              | DOM lớn → cần virtual          |
+| > 10k item        | virtual scroll + windowed fetch   | Bắt buộc cả hai                |
+
+### `contain: content` cho item
+
+Cô lập layout/paint của mỗi item — đổi 1 item không reflow toàn list:
+
+```css
+.list-item {
+  contain: content;
+}
+```
+
+Đo trên feed 500 item: style recalc giảm 60-80% khi expand 1 item.
+
+### Trade-off content-visibility vs virtual scroll
+
+| Tiêu chí          | `content-visibility`         | Virtual scroll                |
+| ----------------- | ---------------------------- | ----------------------------- |
+| DOM size          | Đầy đủ (vẫn N node)         | Chỉ visible                   |
+| Memory            | Tiết kiệm 1 phần             | Tiết kiệm tối đa              |
+| `Cmd+F` search    | Hoạt động (browser native)   | **Không** — node chưa mount  |
+| Screen reader     | Đầy đủ                       | Phụ thuộc impl                |
+| Triển khai        | 2 dòng CSS                   | Lib + integrate               |
+
+**Quy tắc**: nếu list dài nhưng không tới hàng nghìn → ưu tiên
+`content-visibility`. SEO/accessibility tự nhiên hơn.
+
+---
+
+## 10. Image & embed trong danh sách dài
+
+Image trong list dài là kẻ giết perf phổ biến nhất sau DOM size.
+
+### Lazy loading native
+
+```html
+<img src="..." loading="lazy" decoding="async" alt="..." />
+```
+
+- `loading="lazy"`: browser tự defer load tới khi gần viewport. Hỗ
+  trợ baseline modern, fallback an toàn (load ngay).
+- `decoding="async"`: decode image off-main-thread, không block
+  scrolling.
+
+### Reserve space — chống CLS
+
+Không bao giờ render `<img>` không có size. Browser không biết
+height → spacer placeholder = 0 → khi image load, **layout shift**:
+
+```html
+<!-- ✅ với aspect-ratio CSS -->
+<img src="..." style="aspect-ratio: 16/9; width: 100%" />
+
+<!-- ✅ hoặc width/height attribute -->
+<img src="..." width="640" height="360" />
+```
+
+Browser dùng tỉ lệ này để reserve slot ngay từ first paint.
+
+### `srcset` cho responsive — không tải ảnh thừa
+
+```html
+<img
+  src="card-400.jpg"
+  srcset="card-400.jpg 400w, card-800.jpg 800w, card-1200.jpg 1200w"
+  sizes="(max-width: 600px) 90vw, 400px"
+  alt="..."
+/>
+```
+
+Thiết bị mobile chỉ tải bản 400w, không lãng phí băng thông tải bản
+1200w để render xuống 400px.
+
+### Trong virtual scroll
+
+Tổ hợp nguy hiểm: virtual scroll mount/unmount item liên tục → image
+re-load mỗi lần re-mount. Mitigate:
+
+- HTTP cache: ảnh giữ nguyên URL → browser cache hit.
+- `Cache-Control: public, max-age=31536000, immutable` cho static asset.
+- Pre-decode image phổ biến: `new Image().src = url` trong idle callback
+  cho ảnh user sắp scroll tới.
+
+### Embed (YouTube, Twitter, etc.) — không bao giờ render trực tiếp
+
+Nhúng iframe YouTube đầy đủ ngay trong list = **mỗi item +500KB JS,
+500ms blocking**. Dùng [`lite-youtube-embed`](https://github.com/paulirish/lite-youtube-embed)
+hoặc tự làm:
+
+```html
+<button class="yt-thumb" data-video-id="abc123">
+  <img src="https://i.ytimg.com/vi/abc123/hqdefault.jpg" />
+  <svg class="play-icon">...</svg>
+</button>
+```
+
+Click → mới swap ra iframe thật. 500KB → 5KB cho mỗi card.
+
+---
+
+## 11. Restore scroll position — back button không nhảy
+
+User scroll xuống item #200, click vào detail, back lại → trang nhảy
+về top. UX khốn khổ.
+
+### Browser native (cho regular page)
+
+```js
+// Default trên hầu hết browser:
+history.scrollRestoration = 'auto';
+```
+
+Browser tự nhớ `scrollTop` per history entry. **Hoạt động tốt** với
+SSR/static page có DOM đầy đủ trước khi browser chạy script.
+
+### SPA — phải tự handle
+
+Vấn đề: client navigate → DOM thay đổi → browser không biết phải
+restore vào đâu.
+
+```ts
+history.scrollRestoration = 'manual';
+
+// Khi navigate AWAY: lưu scroll position theo route
+function onRouteLeave(pathname: string) {
+  sessionStorage.setItem(
+    `scroll:${pathname}`,
+    String(window.scrollY)
+  );
+}
+
+// Khi navigate BACK: đợi DOM ready rồi restore
+function onRouteEnter(pathname: string, isPopState: boolean) {
+  if (!isPopState) {
+    window.scrollTo(0, 0);
+    return;
+  }
+  const saved = sessionStorage.getItem(`scroll:${pathname}`);
+  if (saved) {
+    // Phải đợi DOM render xong, không thì scroll vào "void"
+    requestAnimationFrame(() =>
+      window.scrollTo(0, Number(saved))
+    );
+  }
+}
+```
+
+### Khó với infinite scroll
+
+User ở item #200 (đã fetch 10 page), navigate đi, back lại → DOM
+chỉ có page 1 đầu tiên. Restore scrollY = item #200 nhưng item đó
+chưa có → fail.
+
+Giải pháp:
+
+1. **Cache fetched data trong memory/sessionStorage**: React Query
+   `staleTime: Infinity` + `gcTime: 5 * 60 * 1000`.
+2. **Cache scroll position + cursor cuối**: restore data trước, scroll
+   sau khi list đủ dài.
+3. **Lưu state ở URL** (hash hoặc query): `/feed#item-200` → router
+   tự scroll vào anchor, infinite scroll lib cho phép `scrollToIndex`.
+
+### Library hỗ trợ
+
+- **Next.js App Router**: tự động `scroll-restoration` cho mọi route.
+- **TanStack Router / React Router 6.4+**: `<ScrollRestoration />` component.
+- **Virtuoso, TanStack Virtual**: API `scrollToIndex(n)` để restore
+  vào item cụ thể.
+
+---
+
+## 12. SEO & accessibility — chỗ infinite scroll hay sai
+
+Infinite scroll thường được implement ngây thơ, ngó lơ 2 vế quan trọng:
+
+### SEO
+
+Crawler (Googlebot, Bingbot) **không scroll**. Bot chỉ thấy phần render
+ban đầu. Nếu nội dung quan trọng nằm sau item #50 → không bao giờ
+được index.
+
+Giải pháp:
+
+1. **Pagination URL song song**: dù UI là infinite, vẫn expose
+   `/blog?page=2`, `/blog?page=3` cho crawler.
+2. **`rel="next"` / `rel="prev"`** trong `<head>` của trang đầu.
+3. **Server-render trang đầu đầy đủ**: SSR ít nhất 1 page → crawler
+   thấy nội dung core.
+4. **Sitemap.xml**: list mọi item URL → crawler discover qua đường
+   khác.
+
+### Accessibility
+
+| Vấn đề                         | Fix                                                    |
+| ------------------------------ | ------------------------------------------------------ |
+| Screen reader không biết list dài thêm | `aria-live="polite"` cho region thông báo "đã load thêm 10 item" |
+| Loading spinner không announce | `<div role="status" aria-live="polite">Đang tải...</div>` |
+| End of list không announce     | "Đã xem hết" message với `role="status"`               |
+| Keyboard không thấy item virtual | Cho phép `Tab` vào sentinel/focusable item           |
+| `Cmd+F` không tìm thấy item virtual | Dùng `content-visibility` thay virtual scroll khi possible |
+
+```tsx
+<ul aria-label="Bài viết" role="feed" aria-busy={loading}>
+  {items.map((it) => (
+    <li key={it.id} aria-posinset={it.index} aria-setsize={total ?? -1}>
+      ...
+    </li>
+  ))}
+</ul>
+
+{loading && (
+  <div role="status" aria-live="polite">
+    Đang tải thêm bài...
+  </div>
+)}
+```
+
+`role="feed"` là [ARIA 1.1 pattern](https://www.w3.org/WAI/ARIA/apg/patterns/feed/)
+chuyên cho infinite scroll content.
+
+### Footer biến mất
+
+Footer của trang nằm sau list. Infinite scroll = list không bao giờ
+hết = **user không bao giờ với tới footer**. Mọi link footer (privacy,
+contact, term) trở nên không truy cập được.
+
+Fix:
+
+- Đặt link footer-essential lên header/sidebar.
+- "Load more" button thay vì auto-load — user dừng được.
+- Sticky footer với link tối thiểu.
+
+---
+
+## 13. Pitfalls thường gặp trong production
+
+### Memory leak với infinite scroll
+
+Items array tăng vô hạn → state tăng → memory tăng. 10k item × 2KB
+data = 20MB chỉ riêng JS objects.
+
+Mitigate:
+
+- **Windowing data thật sự**: chỉ giữ 5 page gần nhất, drop page xa.
+- **`useInfiniteQuery` + `maxPages`**: TanStack Query 5+ có option
+  giới hạn số page giữ trong cache.
+- **Virtual scroll**: DOM đỡ hẳn nhưng JS data vẫn còn — cần combo.
+
+### Re-render storm khi append
+
+Mỗi lần fetch xong, append vào array:
+
+```ts
+// ❌ tạo array mới → re-render mọi child nếu key không stable
+setItems((prev) => [...prev, ...newItems]);
+
+// Vẫn là cách trên, NHƯNG cần:
+{items.map((it) => <Item key={it.id} item={it} />)}
+//                       ▲
+//                       └── key STABLE — không phải index!
+```
+
+`key={index}` = mọi item re-render khi append. `key={it.id}` = chỉ
+new item mount.
+
+Bên cạnh đó, `<Item>` nên `React.memo`-ed nếu prop stable:
+
+```tsx
+const Item = React.memo(({ item }: { item: ItemData }) => {
+  return <div>...</div>;
+});
+```
+
+### Cursor null khi fetch initial page
+
+```ts
+// ❌ điều kiện thiếu — fetch loop vô tận khi server trả [] với cursor null
+if (!isFetching) fetchPage(cursor);
+
+// ✅ check done flag
+if (!isFetching && !done) fetchPage(cursor);
+```
+
+Edge case kinh điển: server trả page rỗng + `nextCursor: null` → client
+phải đặt `done = true` ngay, đừng để IO observer tiếp tục trigger.
+
+### Sentinel render khi container chưa scroll được
+
+Trang ban đầu chỉ có 5 item, content không đủ scrollable → IO bắn
+`isIntersecting = true` ngay → fetch tiếp. OK. Nhưng nếu page tiếp
+cũng không đủ → loop fetch tới khi server hết data.
+
+Fix: thêm điều kiện `entry.intersectionRatio > 0` và rate-limit fetch:
+
+```ts
+if (entry.isIntersecting && entry.intersectionRatio > 0 && !loading) {
+  // ...
+}
+```
+
+Hoặc tốt hơn: load ngay trước cho đủ initial viewport (e.g. 2 page
+ngay từ đầu).
+
+### Scroll to bottom trên iOS Safari
+
+iOS có **rubber band** bouncing. `scrollTop = scrollHeight` không
+chính xác — thực tế thấp hơn `scrollHeight - clientHeight`. Dùng:
+
+```ts
+const distanceToBottom =
+  el.scrollHeight - el.scrollTop - el.clientHeight;
+const atBottom = distanceToBottom < 5; // tolerance
+```
+
+### Scroll smooth + IntersectionObserver = race
+
+`scrollIntoView({ behavior: 'smooth' })` chạy 200-500ms. IO trong
+khoảng đó có thể trigger nhiều lần. Dùng `once: true` debounce hoặc
+disconnect/reconnect:
+
+```ts
+io.disconnect();
+target.scrollIntoView({ behavior: 'smooth' });
+setTimeout(() => io.observe(sentinel), 600);
+```
+
+---
+
+## 14. Checklist
+
+### Infinite scroll
+
+- [ ] Dùng IntersectionObserver + sentinel, không listen `scroll`
+- [ ] `rootMargin` ~400px để fetch sớm trước khi user nhìn thấy đáy
+- [ ] Backend trả cursor-based pagination, không offset
+- [ ] Client cache với React Query / SWR `useInfiniteQuery`
+- [ ] `key` stable theo `id`, không index, item `React.memo`
+- [ ] Có `done` flag để dừng IO khi hết data
+- [ ] `aria-live` thông báo "đã load X item mới"
+- [ ] Có pagination URL song song cho SEO
+- [ ] Lưu scroll position + data khi navigate đi → restore khi back
+
+### Virtual scroll
+
+- [ ] Dùng lib (TanStack Virtual / Virtuoso / react-window) thay vì tự code
+- [ ] `overscan` 3-10 cho smooth scroll
+- [ ] `transform: translateY` thay `top` cho item position
+- [ ] `contain: strict` hoặc `content` trên container
+- [ ] `will-change: transform` cho item đang animate
+- [ ] Variable height: ResizeObserver + cache, anchor scroll khi resize
+- [ ] Image dùng `aspect-ratio` reserve space → không CLS
+- [ ] Image `loading="lazy" decoding="async"` + `srcset`
+- [ ] Pre-decode image likely visible với `new Image()`
+
+### Bidirectional / chat
+
+- [ ] "Stick to bottom" detect distance < 50px
+- [ ] Không auto-scroll khi user đang đọc lịch sử, hiện badge "new message"
+- [ ] Anchor scroll khi prepend lịch sử cũ
+- [ ] Test wheel/touch direction trên iOS Safari + Chrome
+
+### A11y / SEO
+
+- [ ] `role="feed"` cho container infinite scroll
+- [ ] `aria-posinset` + `aria-setsize` cho mỗi item
+- [ ] Screen reader announce loading & end-of-list
+- [ ] Footer link essential nằm chỗ truy cập được
+- [ ] SSR ít nhất 1 page đầu cho crawler
+
+---
+
+## Tóm tắt
+
+| Kỹ thuật                                 | Effort  | Impact                       | Ưu tiên |
+| ---------------------------------------- | ------- | ---------------------------- | ------- |
+| `IntersectionObserver` + sentinel        | 30 phút | Cao (CPU)                    | 1       |
+| Cursor-based pagination backend          | 1-2h    | Cao (data correctness)       | 2       |
+| `content-visibility` cho list trung bình | 15 phút | Cao (initial render)         | 3       |
+| Virtual scroll lib cho list lớn          | 2-4h    | Cực cao (DOM/memory)         | 4       |
+| `aspect-ratio` cho image trong list      | 15 phút | Cao (CLS)                    | 5       |
+| Lazy image + srcset                      | 30 phút | Cao (bandwidth)              | 6       |
+| Restore scroll position                  | 1-2h    | Trung bình (UX)              | 7       |
+| ARIA `role="feed"` + announce            | 1h      | Trung bình (a11y)            | 8       |
+| Stick-to-bottom cho chat                 | 2-3h    | Cao trong chat use case      | 9       |
+
+> **Quy tắc**: list nhỏ → đừng over-engineer, render hết. List trung
+> bình → `content-visibility` + lazy image là đủ. List lớn / data
+> bao la → infinite fetch + virtual render. Không có viên đạn bạc,
+> chọn tier theo size thực tế của data.
+
+Hai khái niệm "infinite scroll" và "virtual scroll" giải quyết 2 vấn
+đề khác nhau và **có thể kết hợp**. Đa số bug trong production đến
+từ confuse 2 cái này — fetch hết về rồi render hết, hoặc virtualize
+mà không có data fetching strategy. Hiểu spectrum, chọn đúng tier,
+và đo bằng RUM thật trên user thật.
+
+---
+
+## Nguồn tham khảo
+
+- [MDN — IntersectionObserver](https://developer.mozilla.org/en-US/docs/Web/API/Intersection_Observer_API)
+- [web.dev — `content-visibility`](https://web.dev/articles/content-visibility)
+- [web.dev — Virtualize large lists](https://web.dev/articles/virtualize-long-lists-react-window)
+- [TanStack Virtual docs](https://tanstack.com/virtual/latest)
+- [Virtuoso — React virtual list](https://virtuoso.dev/)
+- [Virtua — modern virtual scroll](https://github.com/inokawa/virtua)
+- [W3C ARIA Authoring Practices — Feed pattern](https://www.w3.org/WAI/ARIA/apg/patterns/feed/)
+- [Smashing Magazine — Why infinite scroll is hard](https://www.smashingmagazine.com/2022/03/designing-better-infinite-scroll/)
+- [Adrian Roselli — Infinite scrolling and accessibility](https://adrianroselli.com/2014/05/avoid-infinite-scrolling.html)
+- [Google Search Central — Infinite scroll search-friendly](https://developers.google.com/search/blog/2014/02/infinite-scroll-search-friendly)
