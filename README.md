@@ -147,7 +147,7 @@ token qua `var(--color-*)` hoặc Tailwind utility class.
 ### 1. Push repo lên GitHub
 
 ```bash
-gh repo create jvinhit-blog --public --source=. --push
+gh repo create jvinhit.github.io --public --source=. --push
 # hoặc setup remote thủ công rồi git push
 ```
 
@@ -193,7 +193,7 @@ mọi internal link cần prepend `/<repo>`. Ta xử lý tự động qua env va
 | `SITE_URL`  | _(unset → SITE.url)_ | `https://<user>.github.io` |
 | `BASE_PATH` | _(unset → `/`)_      | `/<repo>`                  |
 
-Workflow đã hard-code giá trị cho repo `jvinhit/jvinhit-blog`. **Nếu rename
+Workflow đã hard-code giá trị cho repo `jvinhit/jvinhit.github.io`. **Nếu rename
 repo hoặc fork sang tên khác, đổi 2 env var trong
 `.github/workflows/deploy-gh-pages.yml` cho khớp.**
 
@@ -211,9 +211,9 @@ repo hoặc fork sang tên khác, đổi 2 env var trong
 **Test base path locally**
 
 ```bash
-SITE_URL=https://jvinhit.github.io BASE_PATH=/jvinhit-blog npm run build
+SITE_URL=https://jvinhit.github.io BASE_PATH=/jvinhit.github.io npm run build
 npx serve dist  # hoặc python3 -m http.server -d dist 8000
-# Mở http://localhost:3000/jvinhit-blog/ (KHÔNG phải /)
+# Mở http://localhost:3000/jvinhit.github.io/ (KHÔNG phải /)
 ```
 
 **Đổi sang custom domain sau này**

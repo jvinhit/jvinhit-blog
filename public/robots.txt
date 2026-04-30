@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://jvinhit.github.io/jvinhit-blog/sitemap-index.xml
+Sitemap: https://jvinhit.github.io/sitemap-index.xml

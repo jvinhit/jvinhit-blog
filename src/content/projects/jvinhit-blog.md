@@ -11,8 +11,8 @@ stack:
   - MDX
   - GitHub Pages
 links:
-  site: 'https://jvinhit.github.io/jvinhit-blog/'
-  repo: 'https://github.com/jvinhit/jvinhit-blog'
+  site: 'https://jvinhit.github.io/'
+  repo: 'https://github.com/jvinhit/jvinhit.github.io'
 featured: true
 endDate: 2026-04-26
 order: 1

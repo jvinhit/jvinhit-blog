@@ -55,7 +55,6 @@ jobs:
           #   - Rename repo: update BASE_PATH
           #   - Dùng custom domain (CNAME): xoá BASE_PATH, đổi SITE_URL
           SITE_URL: https://jvinhit.github.io
-          BASE_PATH: /jvinhit-blog
         run: npm run build
 
       - name: Upload Pages artifact
