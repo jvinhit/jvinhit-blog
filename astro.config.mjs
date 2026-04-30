@@ -22,7 +22,16 @@ const BASE_PATH = process.env.BASE_PATH ?? '/';
 export default defineConfig({
   site: SITE_URL,
   base: BASE_PATH,
-  trailingSlash: 'never',
+  // `'always'` → Astro generate URL với trailing slash trong sitemap, link,
+  // và canonical. Cần thiết để:
+  //   1. Sitemap URL prefix khớp với GH Pages serve path (GH Pages 301 redirect
+  //      path không slash → có slash cho directory routes).
+  //   2. Khớp với property URL prefix trên Google Search Console
+  //      (`https://jvinhit.github.io/jvinhit-blog/` có trailing slash).
+  // Nếu giữ `'never'`, homepage URL trong sitemap thành
+  // `https://jvinhit.github.io/jvinhit-blog` (không slash) → bị 301 → Google
+  // báo "Sitemap could not be read".
+  trailingSlash: 'always',
 
   integrations: [
     mdx(),

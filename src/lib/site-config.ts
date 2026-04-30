@@ -56,12 +56,26 @@ export type SiteConfig = typeof SITE;
  * - GitHub Pages project site (jvinhit.github.io/jvinhit-blog) → base = `/jvinhit-blog/`
  *   → tự prepend prefix vào mọi link
  *
+ * Tự động thêm trailing slash cho directory-like paths để khớp với
+ * `trailingSlash: 'always'` của Astro — tránh 301 redirect khi user click
+ * internal link. File paths (có extension như `.svg`, `.xml`, `.png`),
+ * query strings, hash anchors được giữ nguyên.
+ *
  * External URLs (http/https/mailto/tel) được return nguyên vẹn.
  */
 export function withBase(path: string): string {
   if (/^(https?:|mailto:|tel:|#|data:)/i.test(path)) return path;
+
   const base = import.meta.env.BASE_URL;
   const normalizedBase = base.endsWith('/') ? base.slice(0, -1) : base;
   const normalizedPath = path.startsWith('/') ? path : `/${path}`;
-  return `${normalizedBase}${normalizedPath}`;
+
+  const isFile = /\.[a-z0-9]+$/i.test(normalizedPath);
+  const hasQueryOrHash = /[?#]/.test(normalizedPath);
+  const alreadyHasSlash = normalizedPath.endsWith('/');
+  const needsTrailingSlash = !alreadyHasSlash && !isFile && !hasQueryOrHash;
+
+  const finalPath = needsTrailingSlash ? `${normalizedPath}/` : normalizedPath;
+
+  return `${normalizedBase}${finalPath}`;
 }
