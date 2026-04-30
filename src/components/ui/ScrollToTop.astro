@@ -1,0 +1,106 @@
+---
+import { ArrowUp } from '@lucide/astro';
+---
+
+{/* Sentinel: nằm ở đầu <body>, IntersectionObserver theo dõi nó để biết
+    user đã scroll qua chưa — rẻ hơn scroll listener (không trigger reflow
+    mỗi lần scroll). Position absolute → không chiếm chỗ trong flex layout.
+    Cao 50vh để button chỉ xuất hiện khi user scroll qua ~half viewport. */}
+<div data-scroll-top-sentinel aria-hidden="true"></div>
+
+<button
+  type="button"
+  class="group fixed right-4 bottom-4 z-30 inline-flex h-10 w-10 items-center justify-center rounded-xs border border-[var(--color-border-strong)] bg-[var(--color-surface)] text-[var(--color-fg)] shadow-[0_8px_24px_-12px_rgba(0,0,0,0.6)] transition-[opacity,transform,color,border-color,background-color] duration-200 ease-out hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] sm:right-6 sm:bottom-6"
+  aria-label="Scroll to top"
+  data-scroll-top
+  data-state="hidden"
+  tabindex="-1"
+>
+  <ArrowUp class="h-5 w-5" aria-hidden="true" />
+</button>
+
+<style>
+  /* Show/hide drive bằng [data-state] để JS chỉ set 1 attribute,
+   * tránh xung đột với utility classes của Tailwind. */
+  [data-scroll-top][data-state='hidden'] {
+    opacity: 0;
+    transform: translateY(8px);
+    pointer-events: none;
+  }
+  [data-scroll-top][data-state='visible'] {
+    opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
+  }
+
+  /* Sentinel: cao 50vh để khi user scroll qua nó (≈ nửa viewport) button
+   * mới xuất hiện. Position absolute để không chiếm chỗ trong layout flow. */
+  [data-scroll-top-sentinel] {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 1px;
+    height: 50vh;
+    pointer-events: none;
+  }
+</style>
+
+<script>
+  /**
+   * Scroll-to-top controller.
+   *
+   * - Visibility: dùng IntersectionObserver theo dõi sentinel ở top page,
+   *   khi sentinel ra khỏi viewport (user scroll xuống) → reveal button.
+   *   Cách này tránh scroll listener (vốn fire mỗi frame, gây jank trên
+   *   low-end mobile khi đang animate).
+   * - Click handler: smooth scroll, hoặc instant nếu user prefers
+   *   reduced motion (không inject animation họ không muốn).
+   * - Tab order: khi ẩn, tabindex=-1 để skip; khi visible, set thành 0.
+   */
+  function init() {
+    const button = document.querySelector<HTMLButtonElement>(
+      '[data-scroll-top]'
+    );
+    const sentinel = document.querySelector<HTMLElement>(
+      '[data-scroll-top-sentinel]'
+    );
+    if (!button || !sentinel) return;
+
+    const setVisible = (visible: boolean) => {
+      button.dataset.state = visible ? 'visible' : 'hidden';
+      button.tabIndex = visible ? 0 : -1;
+      button.setAttribute('aria-hidden', String(!visible));
+    };
+
+    // IntersectionObserver fallback: nếu browser không hỗ trợ, ẩn button.
+    // Có thể fallback sang scroll listener nhưng IO đã support 95%+ — không
+    // đáng phức tạp thêm code path.
+    if (typeof IntersectionObserver === 'undefined') {
+      setVisible(false);
+      return;
+    }
+
+    const observer = new IntersectionObserver(([entry]) => {
+      // Sentinel intersecting → user vẫn còn trong khoảng top → ẩn button.
+      setVisible(!entry.isIntersecting);
+    });
+    observer.observe(sentinel);
+
+    // Click → scroll lên top. Respect reduced-motion (đã được set trên
+    // <html> bởi inline script trong BaseLayout).
+    button.addEventListener('click', () => {
+      const reducedMotion =
+        document.documentElement.classList.contains('reduced-motion');
+      window.scrollTo({
+        top: 0,
+        behavior: reducedMotion ? 'auto' : 'smooth',
+      });
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init, { once: true });
+  } else {
+    init();
+  }
+</script>
