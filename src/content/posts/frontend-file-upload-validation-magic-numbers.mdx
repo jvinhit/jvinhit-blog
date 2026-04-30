@@ -1,0 +1,636 @@
+---
+title: 'Frontend có tin được khi validate file upload không? Đào sâu vào binary và magic number'
+description: 'Frontend validation đẹp nhưng dễ bypass. Bài này đào sâu magic number, cấu trúc PNG, detect executable bằng TypeScript, polyglot file, và defense in depth đúng cách.'
+pubDate: 2026-04-30
+tags: [security, javascript, file-upload, web-security, typescript]
+draft: false
+---
+
+Hãy tưởng tượng cảnh này: user của bạn đổi tên `malware.exe` thành
+`photo.png`, kéo thả vào ô upload, và frontend xinh đẹp của bạn — vốn
+chỉ check `file.type === 'image/png'` — gật đầu cho qua. File được upload
+lên S3, signed URL được trả về, và backend (cũng tin tưởng "frontend đã
+check rồi") serve nó như một image. Một user khác mở `<img src="...">`,
+trình duyệt từ chối render — nhưng file vẫn nằm đó, chờ một ngày được
+download và execute.
+
+Câu hỏi đặt ra: **frontend validation có đáng tin không?** Câu trả lời
+ngắn là **không**. Nhưng câu trả lời dài thú vị hơn nhiều — và nó dẫn ta
+đi qua magic number, cấu trúc binary của PNG, các kỹ thuật detect
+executable trong browser, và cuối cùng là kiến trúc **defense in depth**
+mà mọi hệ thống upload nên có.
+
+Bài này dành cho frontend / fullstack engineer đã quen với File API và
+TypeScript, muốn hiểu sâu hơn về **tại sao `file.type` không đáng tin**
+và **làm thế nào để đọc binary trong browser một cách an toàn**.
+
+---
+
+## Mục lục
+
+1. [Tại sao frontend validation không phải security layer](#1-tại-sao-frontend-validation-không-phải-security-layer)
+2. [Magic number — cách thật sự để biết file là gì](#2-magic-number--cách-thật-sự-để-biết-file-là-gì)
+3. [Deep dive: cấu trúc file PNG](#3-deep-dive-cấu-trúc-file-png)
+4. [Detect executable files](#4-detect-executable-files)
+5. [3 mức độ validation ở frontend](#5-3-mức-độ-validation-ở-frontend)
+6. [Giới hạn của frontend validation](#6-giới-hạn-của-frontend-validation)
+7. [Defense in depth — kiến trúc đúng](#7-defense-in-depth--kiến-trúc-đúng)
+8. [Thư viện khuyến nghị](#8-thư-viện-khuyến-nghị)
+9. [Kết luận](#9-kết-luận)
+
+---
+
+## 1. Tại sao frontend validation không phải security layer
+
+Mọi check ta viết trong JavaScript đều **chạy trên máy của attacker**.
+Nghĩa là họ kiểm soát hoàn toàn nó. Cụ thể, có ít nhất 4 cách bypass:
+
+- **Disable JavaScript** — DevTools → Settings → "Disable JavaScript".
+  Toàn bộ validation biến mất, form vẫn submit.
+- **Sửa DOM trực tiếp** — gỡ thuộc tính `accept`, đổi `disabled` của
+  nút submit, hoặc patch hàm validate ngay trong console.
+- **Gọi thẳng API** — `curl -F file=@malware.exe https://api.example.com/upload`.
+  Frontend không tồn tại trong request này.
+- **Intercept proxy** — Burp Suite, mitmproxy, hay browser extension
+  nào cũng có thể sửa request trên đường đi.
+
+Kết luận quan trọng — và sẽ được lặp lại nhiều lần trong bài này:
+
+> **Frontend validation là UX layer, không phải security layer.**
+
+Vậy có nên làm không? **Có.** Vì 3 lý do:
+
+1. **UX**: phản hồi tức thì, không phải đợi roundtrip mới biết file
+   sai format.
+2. **Giảm tải backend**: 99% user là người dùng bình thường, chặn được
+   ở browser thì không tốn bandwidth và CPU server.
+3. **Reduce attack surface**: ít file rác chạm tới backend nghĩa là
+   ít cơ hội cho zero-day trong decoder server-side.
+
+Nhưng phải tâm niệm: **mọi check bạn viết ở đây, attacker đều có thể
+bỏ qua.** Backend bắt buộc phải lặp lại toàn bộ logic.
+
+---
+
+## 2. Magic number — cách thật sự để biết file là gì
+
+`file.type` đến từ đâu? Browser đoán dựa trên **extension**. Đổi tên
+`malware.exe` thành `photo.png` thì `file.type` sẽ là `image/png` — vô
+nghĩa với security.
+
+Cách duy nhất reliable để biết file thật sự là gì là đọc **magic number**
+(còn gọi là **file signature**): vài byte đầu tiên của file, được spec
+quy định để identifier format. Ví dụ:
+
+| Format | Magic number (hex)             | Vị trí | Ghi chú                           |
+| ------ | ------------------------------ | ------ | --------------------------------- |
+| PNG    | `89 50 4E 47 0D 0A 1A 0A`      | 0      | 8 bytes — thiết kế rất tinh tế    |
+| JPEG   | `FF D8 FF`                     | 0      | + variant (E0/E1/DB) byte thứ 4   |
+| GIF    | `47 49 46 38 37 61` (`GIF87a`) | 0      | hoặc `GIF89a`                     |
+| PDF    | `25 50 44 46 2D` (`%PDF-`)     | 0      | theo sau là version `1.4`, `1.7`… |
+| ZIP    | `50 4B 03 04` (`PK..`)         | 0      | dùng chung bởi DOCX, XLSX, JAR    |
+| EXE    | `4D 5A` (`MZ`)                 | 0      | Windows PE — `MZ` = Mark Zbikowski |
+| ELF    | `7F 45 4C 46`                  | 0      | Linux executable                  |
+| Mach-O | `FE ED FA CE` / `CF FA ED FE`  | 0      | macOS — 32 / 64 bit, BE / LE      |
+| Java   | `CA FE BA BE`                  | 0      | `.class` — đụng với Mach-O fat!   |
+
+Reading bytes trong browser dùng API rất chuẩn: `Blob.slice()` để cắt
+phần đầu (không load cả file vào RAM), `arrayBuffer()` để đọc, rồi
+`Uint8Array` / `DataView` để truy cập từng byte:
+
+```ts
+// src/lib/sniff.ts
+// Đọc N byte đầu tiên của file. Dùng Blob.slice() vì:
+// (1) không load toàn bộ file vào memory — quan trọng với file 1GB,
+// (2) signature của hầu hết format chỉ nằm trong 16 byte đầu.
+async function readHead(file: File, length: number): Promise<Uint8Array> {
+  const slice = file.slice(0, length);
+  const buffer = await slice.arrayBuffer();
+  return new Uint8Array(buffer);
+}
+
+// So sánh prefix bytes. Dùng `every` thay vì `===` trên hex string vì
+// performance — không cần allocate string mỗi lần check.
+function startsWith(bytes: Uint8Array, signature: number[]): boolean {
+  if (bytes.length < signature.length) return false;
+  return signature.every((b, i) => bytes[i] === b);
+}
+
+export type DetectedKind =
+  | 'png'
+  | 'jpeg'
+  | 'gif'
+  | 'pdf'
+  | 'zip'
+  | 'unknown';
+
+export async function detectKind(file: File): Promise<DetectedKind> {
+  // 12 byte là đủ cho mọi signature trong bảng trên (PNG dài nhất: 8).
+  const head = await readHead(file, 12);
+
+  if (startsWith(head, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) {
+    return 'png';
+  }
+  if (startsWith(head, [0xff, 0xd8, 0xff])) return 'jpeg';
+  if (startsWith(head, [0x47, 0x49, 0x46, 0x38])) return 'gif';
+  if (startsWith(head, [0x25, 0x50, 0x44, 0x46, 0x2d])) return 'pdf';
+  if (startsWith(head, [0x50, 0x4b, 0x03, 0x04])) return 'zip';
+
+  return 'unknown';
+}
+```
+
+Một câu chuyện thú vị từ bảng trên: byte `4D 5A` (`MZ`) ở đầu file `.exe`
+là **chữ ký của Mark Zbikowski**, một developer Microsoft thiết kế format
+DOS executable năm 1981. Hơn 40 năm sau, ta vẫn check bytes của ông ấy
+để phát hiện malware.
+
+---
+
+## 3. Deep dive: cấu trúc file PNG
+
+PNG signature 8 bytes là một trong những thiết kế tinh tế nhất trong
+lịch sử file format. Mỗi byte đều có lý do:
+
+```text
+ byte:    0x89    P     N     G    \r    \n   0x1A   \n
+ hex:      89    50    4E    47    0D    0A    1A    0A
+           │     └──┴──┴──┘   │     │     │     │
+           │       "PNG"      │     │     │     └── Unix line ending
+           │                  │     │     └─────── DOS EOF (Ctrl-Z)
+           │                  │     └───────────── second part of CRLF
+           │                  └─────────────────── first part of CRLF
+           └────────────────────────────────────── high bit set: phát hiện
+                                                    7-bit transmission
+```
+
+Tại sao thiết kế lằng nhằng vậy? Vì **mỗi byte là một bẫy** để phát
+hiện file bị corrupt:
+
+- **`0x89`** (high bit = 1): nếu file đi qua kênh truyền tải 7-bit
+  (FTP ASCII mode cũ), byte này bị strip → signature hỏng → reader
+  từ chối.
+- **`PNG`** (3 chữ ASCII): để con người mở bằng `cat` cũng nhận ra ngay.
+- **`\r\n`** (CRLF): nếu hệ thống tự convert line ending (Windows ↔
+  Unix), CRLF này sẽ bị mangle → detect được.
+- **`0x1A`** (DOS Ctrl-Z, EOF): nếu in file bằng `type` trên DOS,
+  output sẽ dừng tại đây thay vì xả hàng nghìn ký tự garbage.
+- **`\n`** cuối: tương tự CRLF, detect Unix-side mangling.
+
+Rút gọn: **8 byte, 5 bẫy phát hiện 5 loại transmission error khác
+nhau.** Đây là lý do vì sao "magic number" trong PNG không chỉ là
+identifier — nó còn là **integrity check sơ bộ**.
+
+### Cấu trúc chunk
+
+Sau signature, PNG là chuỗi các **chunk**, mỗi chunk có format:
+
+```text
+ ┌──────────┬──────────┬──────────────────────┬──────────┐
+ │  Length  │   Type   │         Data         │   CRC32  │
+ │ 4 bytes  │ 4 bytes  │     Length bytes     │ 4 bytes  │
+ │ (uint32 │ (4 ASCII │ (nội dung tuỳ chunk) │ (verify  │
+ │   BE)    │   chars) │                      │ Type+Data│
+ └──────────┴──────────┴──────────────────────┴──────────┘
+```
+
+3 loại chunk **critical** (bắt buộc):
+
+- **IHDR** — header, luôn là chunk đầu, chứa width / height / bit depth.
+- **IDAT** — image data, có thể có nhiều IDAT liên tiếp.
+- **IEND** — end marker, luôn là chunk cuối, data length = 0.
+
+Code parse PNG đầy đủ:
+
+```ts
+// src/lib/png-parser.ts
+// Đọc uint32 big-endian. PNG luôn dùng BE (network byte order) — khác
+// với hầu hết format Microsoft (BMP, WAV) dùng LE.
+function readUint32BE(view: DataView, offset: number): number {
+  return view.getUint32(offset, false); // false = big-endian
+}
+
+// Type của chunk là 4 ASCII char. Convert sang string để compare dễ hơn.
+function readChunkType(bytes: Uint8Array, offset: number): string {
+  return String.fromCharCode(
+    bytes[offset],
+    bytes[offset + 1],
+    bytes[offset + 2],
+    bytes[offset + 3]
+  );
+}
+
+export interface PngChunk {
+  type: string;
+  length: number;
+  offset: number; // vị trí bắt đầu của chunk trong file
+}
+
+export interface PngValidation {
+  valid: boolean;
+  reason?: string;
+  chunks: PngChunk[];
+  width?: number;
+  height?: number;
+}
+
+const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
+export async function validatePng(file: File): Promise<PngValidation> {
+  // Giới hạn 10MB để tránh DoS khi user upload file 5GB chỉ để hỏng
+  // browser tab. Nếu cần lớn hơn, hãy stream chunk-by-chunk.
+  const MAX_BYTES = 10 * 1024 * 1024;
+  const buffer = await file.slice(0, MAX_BYTES).arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  const view = new DataView(buffer);
+  const chunks: PngChunk[] = [];
+
+  if (!PNG_SIGNATURE.every((b, i) => bytes[i] === b)) {
+    return { valid: false, reason: 'Invalid PNG signature', chunks };
+  }
+
+  let offset = 8; // skip signature
+  let width: number | undefined;
+  let height: number | undefined;
+  let sawIHDR = false;
+  let sawIEND = false;
+
+  while (offset < bytes.length) {
+    // Cần ít nhất 12 byte cho 1 chunk (length + type + crc, data có thể 0).
+    if (offset + 12 > bytes.length) {
+      return { valid: false, reason: 'Truncated chunk header', chunks };
+    }
+
+    const length = readUint32BE(view, offset);
+    const type = readChunkType(bytes, offset + 4);
+
+    chunks.push({ type, length, offset });
+
+    // Spec PNG giới hạn chunk length ≤ 2^31 - 1. Lớn hơn = file gian.
+    if (length > 0x7fffffff) {
+      return { valid: false, reason: `Chunk ${type} length out of spec`, chunks };
+    }
+
+    // IHDR phải là chunk đầu tiên — đây là rule cứng của spec.
+    if (chunks.length === 1 && type !== 'IHDR') {
+      return { valid: false, reason: 'First chunk must be IHDR', chunks };
+    }
+
+    if (type === 'IHDR' && length === 13) {
+      width = readUint32BE(view, offset + 8);
+      height = readUint32BE(view, offset + 12);
+      sawIHDR = true;
+    }
+
+    if (type === 'IEND') {
+      sawIEND = true;
+      break; // theo spec, không gì hợp lệ sau IEND
+    }
+
+    offset += 12 + length; // length(4) + type(4) + data + crc(4)
+  }
+
+  if (!sawIHDR) return { valid: false, reason: 'Missing IHDR', chunks };
+  if (!sawIEND) return { valid: false, reason: 'Missing IEND', chunks };
+
+  return { valid: true, chunks, width, height };
+}
+```
+
+Ví dụ: byte sequence của một PNG 1x1 pixel màu đỏ trông như sau (đã
+strip CRC để gọn):
+
+```text
+ 89 50 4E 47 0D 0A 1A 0A                            <- 8B signature
+ 00 00 00 0D 49 48 44 52                            <- IHDR length=13
+ 00 00 00 01 00 00 00 01 08 02 00 00 00             <-   1x1, RGB, 8bit
+ ...CRC...
+ 00 00 00 0C 49 44 41 54                            <- IDAT length=12
+ ...zlib-compressed pixel...
+ ...CRC...
+ 00 00 00 00 49 45 4E 44                            <- IEND length=0
+ AE 42 60 82                                        <- IEND CRC (hằng số)
+```
+
+Cái hay: **IEND CRC luôn là `AE 42 60 82`** vì nó CRC của type "IEND"
+và data rỗng. Nếu kiểm tra strict, đây là một marker reliable nữa.
+
+Tham khảo: [PNG Specification (W3C/ISO)](https://www.w3.org/TR/png/)
+và [MDN File API](https://developer.mozilla.org/en-US/docs/Web/API/File_API)
+cho phần đọc binary.
+
+---
+
+## 4. Detect executable files
+
+Executable không chỉ là `.exe`. Phân loại theo target:
+
+| Loại        | Format                  | Magic number               |
+| ----------- | ----------------------- | -------------------------- |
+| Native bin  | Windows PE              | `4D 5A` (`MZ`)             |
+| Native bin  | Linux ELF               | `7F 45 4C 46`              |
+| Native bin  | macOS Mach-O 32 (BE)    | `FE ED FA CE`              |
+| Native bin  | macOS Mach-O 64 (LE)    | `CF FA ED FE`              |
+| Native bin  | macOS fat binary        | `CA FE BA BE`              |
+| JVM         | Java `.class`           | `CA FE BA BE`              |
+| Android     | Dalvik `.dex`           | `64 65 78 0A` (`dex\n`)    |
+| Script      | Shebang                 | `23 21` (`#!`)             |
+| Container   | ZIP-based (JAR, APK…)   | `50 4B 03 04`              |
+
+Đáng chú ý: `CA FE BA BE` **đụng giữa Mach-O fat binary và Java class**
+— cùng 4 byte đầu giống hệt nhau. Đây là va chạm cố ý của Apple (NeXT
+chế format này trước Java) và bây giờ ta phải phân biệt bằng byte
+tiếp theo:
+
+- Mach-O fat: byte 4-7 là số lượng arch (uint32 BE), thường `00 00 00 01`
+  đến `00 00 00 0F`.
+- Java class: byte 4-7 là minor + major version, ví dụ `00 00 00 34`
+  cho Java 8.
+
+Code:
+
+```ts
+// src/lib/check-executable.ts
+// Trả về null nếu không phải executable, hoặc tên loại nếu có match.
+// Đây là check rẻ — chỉ đọc 16 byte đầu, đủ cho mọi format trong bảng.
+export type ExecKind =
+  | 'pe-windows'
+  | 'elf-linux'
+  | 'macho'
+  | 'macho-fat'
+  | 'java-class'
+  | 'dex-android'
+  | 'shebang-script';
+
+const SIGS: Array<{ kind: ExecKind; bytes: number[] }> = [
+  { kind: 'pe-windows', bytes: [0x4d, 0x5a] },
+  { kind: 'elf-linux', bytes: [0x7f, 0x45, 0x4c, 0x46] },
+  { kind: 'macho', bytes: [0xfe, 0xed, 0xfa, 0xce] },
+  { kind: 'macho', bytes: [0xfe, 0xed, 0xfa, 0xcf] },
+  { kind: 'macho', bytes: [0xce, 0xfa, 0xed, 0xfe] },
+  { kind: 'macho', bytes: [0xcf, 0xfa, 0xed, 0xfe] },
+  { kind: 'dex-android', bytes: [0x64, 0x65, 0x78, 0x0a] },
+  { kind: 'shebang-script', bytes: [0x23, 0x21] },
+];
+
+export async function checkExecutable(file: File): Promise<ExecKind | null> {
+  const head = new Uint8Array(await file.slice(0, 16).arrayBuffer());
+
+  // Disambiguate CAFEBABE: java có major version 45-65 ở byte 6-7,
+  // mach-o fat có narch nhỏ ở byte 4-7. Heuristic: nếu byte 4-5 đều
+  // = 0 và byte 6-7 ∈ [45, 65] thì khả năng cao là Java class.
+  const isCafebabe =
+    head[0] === 0xca &&
+    head[1] === 0xfe &&
+    head[2] === 0xba &&
+    head[3] === 0xbe;
+
+  if (isCafebabe) {
+    const majorVersion = (head[6] << 8) | head[7];
+    if (head[4] === 0 && head[5] === 0 && majorVersion >= 45 && majorVersion <= 70) {
+      return 'java-class';
+    }
+    return 'macho-fat';
+  }
+
+  for (const sig of SIGS) {
+    if (sig.bytes.every((b, i) => head[i] === b)) return sig.kind;
+  }
+  return null;
+}
+```
+
+Vài câu chuyện đáng nói:
+
+- **Script files (`.sh`, `.ps1`, `.py`, `.js`)** là plain text — không có
+  magic number reliable nào (trừ shebang). Cách duy nhất chặn là
+  reject toàn bộ file extension đó từ allowlist.
+- **Double extension trick** (`photo.png.exe`): trên Windows, hệ điều
+  hành ẩn extension cuối mặc định, user nhìn thấy `photo.png` nhưng
+  click vào thì execute. **Đây là attack thật, không phải lý thuyết.**
+  Frontend nên check tên file có đúng 1 dấu chấm với extension hợp lệ.
+- **SVG là XML — và XML có thể có `<script>`.** Một SVG hợp lệ với
+  magic number text `<svg>` có thể chứa `<script>alert(document.cookie)</script>`.
+  Nếu serve SVG này từ same-origin, attacker XSS cả site. Phải sanitize
+  bằng DOMPurify hoặc serve từ cookieless domain.
+
+---
+
+## 5. 3 mức độ validation ở frontend
+
+Tuỳ trade-off giữa thoroughness và cost, ta có 3 mức:
+
+### Mức 1 — Magic number (rẻ nhất, dùng cho UX)
+
+Đọc 8-16 byte đầu, so signature, xong. Latency &lt; 5ms cho file vài MB.
+Đủ để chặn 99% case "đổi tên `.exe` thành `.png`". Dùng `detectKind()`
+ở section 2.
+
+### Mức 2 — Parse cấu trúc đầy đủ (chắc chắn hơn)
+
+Walk hết các chunk như `validatePng()` ở section 3. Phát hiện file
+truncate, chunk dị, signature đúng nhưng body hỏng. Tốn thêm CPU nhưng
+vẫn under 100ms cho file 10MB.
+
+### Mức 3 — Nhờ browser decode (chắc nhất cho image)
+
+Cách "lười" nhưng mạnh nhất: bắt browser thử decode image. Nếu decode
+thất bại, file chắc chắn không phải image hợp lệ.
+
+```ts
+// src/lib/decode-image.ts
+// Đây là check ở mức cao nhất: browser tự verify rằng ảnh decode được.
+// Nếu không decode được → reject. Trade-off: tốn ~50-200ms tuỳ kích
+// thước, và buộc browser allocate raster buffer trong RAM.
+export async function canDecodeAsImage(file: File): Promise<boolean> {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = new Image();
+    img.src = url;
+    // .decode() resolve khi raster xong, reject nếu format hỏng.
+    // Nó tốt hơn chờ event 'load' vì 'load' chỉ check fetch xong, không
+    // verify thực sự decode.
+    await img.decode();
+    return img.naturalWidth > 0 && img.naturalHeight > 0;
+  } catch {
+    return false;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+```
+
+Lưu ý: mức 3 chỉ áp dụng cho format browser hỗ trợ decode native (PNG,
+JPEG, GIF, WebP, AVIF). Cho PDF / video / audio, vẫn phải parse tay
+hoặc nhờ backend.
+
+---
+
+## 6. Giới hạn của frontend validation
+
+Kể cả khi ta làm cả 3 mức ở trên, vẫn còn những thứ frontend không thể
+catch:
+
+- **Polyglot files**: file vừa hợp lệ với format A vừa hợp lệ với format
+  B. Ví dụ kinh điển là **GIFAR** — vừa là GIF (browser render được),
+  vừa là JAR (JVM execute được). Magic number check không phát hiện vì
+  GIF signature ở đầu file đúng 100%.
+- **File hợp lệ nhưng chứa shellcode trong metadata**: PNG cho phép
+  chunk `tEXt`, `iTXt` chứa text tùy ý. JPEG có EXIF. Attacker có thể
+  giấu payload ở đây và trigger qua bug trong decoder server-side.
+- **Zero-day trong decoder**: ImageMagick từng có rất nhiều CVE
+  (ImageTragick — CVE-2016-3714 là ví dụ kinh điển). File hoàn toàn
+  hợp lệ về format vẫn có thể RCE backend.
+- **Bypass UI hoàn toàn**: như đã nói ở section 1, attacker không cần
+  load page của bạn. Họ gửi request thẳng tới endpoint upload.
+
+Nhắc lại lần thứ N: **frontend validation là UX layer.**
+
+---
+
+## 7. Defense in depth — kiến trúc đúng
+
+Một hệ thống upload an toàn phải có **nhiều lớp**, mỗi lớp giả định
+lớp trên đã thua:
+
+| Lớp                       | Trách nhiệm                                                              |
+| ------------------------- | ------------------------------------------------------------------------ |
+| **Frontend**              | Early rejection bằng magic number, UX feedback, giảm tải backend         |
+| **Signed URL**            | Ràng buộc `Content-Type`, `x-goog-content-length-range`, hết hạn ngắn    |
+| **Cloud Function (post)** | Re-validate magic number, parse cấu trúc, virus scan (ClamAV/VirusTotal) |
+| **Storage bucket**        | Bucket riêng, không public, không serve trực tiếp ra internet            |
+| **CDN/Serving**           | `Content-Disposition: attachment`, sanitize filename, cookieless domain  |
+
+Ví dụ signed URL có ràng buộc thực sự (Google Cloud Storage v4):
+
+```ts
+// src/lib/signed-url.ts
+// Server-side endpoint trả signed URL cho frontend. Điểm mấu chốt:
+// các ràng buộc Content-Type và size được CHÈN VÀO CHỮ KÝ — client
+// không sửa header được mà không invalid signature.
+import { Storage } from '@google-cloud/storage';
+
+const storage = new Storage();
+
+export interface UploadGrant {
+  url: string;
+  headers: Record<string, string>;
+}
+
+export async function grantImageUpload(
+  bucket: string,
+  objectKey: string,
+  contentType: 'image/png' | 'image/jpeg'
+): Promise<UploadGrant> {
+  const [url] = await storage
+    .bucket(bucket)
+    .file(objectKey)
+    .getSignedUrl({
+      version: 'v4',
+      action: 'write',
+      expires: Date.now() + 5 * 60 * 1000, // 5 phút là đủ cho user upload
+      contentType,
+      // Ràng buộc size: 1 byte → 10MB. GCS sẽ reject với 400 nếu vượt.
+      // Header này phải có ở cả phần "sign" và phần request thực tế.
+      extensionHeaders: {
+        'x-goog-content-length-range': '1,10485760',
+      },
+    });
+
+  return {
+    url,
+    headers: {
+      'Content-Type': contentType,
+      'x-goog-content-length-range': '1,10485760',
+    },
+  };
+}
+```
+
+Quy trình full:
+
+```text
+ ┌──────────┐    1. magic check     ┌──────────┐    3. PUT (signed)   ┌───────────────┐
+ │ Frontend │ ────────────────────► │ Frontend │ ───────────────────► │ Cloud Storage │
+ │  (user)  │ ◄───── 2. signed URL ─│ + Backend│                      │   (private)   │
+ └──────────┘                       └──────────┘                      └──────┬────────┘
+                                                                             │ 4. ObjectFinalize event
+                                                                             ▼
+                                                              ┌──────────────────────┐
+                                                              │ Cloud Function       │
+                                                              │ (re-validate, scan,  │
+                                                              │  move to public      │
+                                                              │  bucket if OK)       │
+                                                              └──────────────────────┘
+```
+
+Bước 4 mới là chỗ "thật". Frontend chỉ là filter sơ bộ. Cloud Function
+phải:
+
+1. Đọc lại 16 byte đầu, verify magic number lần nữa.
+2. Parse full structure (như `validatePng`).
+3. Scan virus (ClamAV self-host hoặc VirusTotal API).
+4. Re-encode (đẩy ảnh qua sharp/libvips để strip metadata + normalize)
+   — đây là cách chống polyglot mạnh nhất.
+5. Chỉ khi pass hết, move sang bucket public.
+
+---
+
+## 8. Thư viện khuyến nghị
+
+Không cần tự viết hết — có những lib đã làm tốt:
+
+- **[`file-type`](https://github.com/sindresorhus/file-type)** — detect
+  &gt;100 format, hoạt động cả browser lẫn Node, magic-number-based.
+- **[`magic-bytes.js`](https://github.com/LarsKoelpin/magic-bytes)** —
+  pure browser, no deps, nhỏ gọn nếu chỉ cần check vài format.
+- **[`DOMPurify`](https://github.com/cure53/DOMPurify)** — sanitize SVG
+  (loại `<script>`, `onerror=`, external `<image href>`...). Bắt buộc
+  nếu render SVG từ user.
+- **ClamAV** (self-host) hoặc **VirusTotal API** — virus scan ở backend.
+  ClamAV cập nhật signature hàng ngày, đủ cho mass attack thông thường.
+- **sharp / libvips** — re-encode image ở backend. Strip metadata, từ
+  chối file hỏng, chống polyglot rất hiệu quả.
+
+Combo điển hình cho ảnh: `file-type` ở frontend → signed URL có
+contentType constraint → ClamAV + sharp re-encode ở Cloud Function.
+
+---
+
+## 9. Kết luận
+
+Tóm gọn 3 ý chính cần nhớ:
+
+1. **Frontend validation là UX layer, không phải security layer.**
+   Mọi check JS chạy trên máy attacker.
+2. **Magic number là cách duy nhất reliable** để biết file thật sự là
+   gì — không phải `file.type`, không phải extension. Đọc 8-16 byte
+   đầu là đủ cho 99% trường hợp.
+3. **Defense in depth là mandatory.** Frontend → signed URL ràng buộc
+   → backend re-validate → virus scan → re-encode → serve từ
+   cookieless domain. Bỏ 1 lớp là attacker có cửa.
+
+Action items cho tuần này nếu bạn đang ship feature upload:
+
+- Thêm magic number check ở frontend (mức 1) — khoảng 50 dòng code.
+- Audit signed URL: có ràng buộc `Content-Type` và size không?
+- Audit Cloud Function: có re-validate không, hay chỉ tin frontend?
+- Nếu serve image từ same-origin: chuyển sang sub-domain cookieless,
+  thêm `Content-Disposition: attachment` cho file lạ.
+- Nếu nhận SVG từ user: bắt buộc sanitize qua DOMPurify hoặc convert
+  sang PNG.
+
+PNG signature 8 bytes mất hơn 30 năm nhưng vẫn đứng vững. Ý tưởng cốt
+lõi của nó — *trust nothing, verify bytes, defense in depth* — vẫn là
+nguyên tắc đúng cho mọi format và mọi system upload sau này.
+
+---
+
+**Tham khảo:**
+
+- [PNG Specification (W3C/ISO)](https://www.w3.org/TR/png/)
+- [MDN — File API](https://developer.mozilla.org/en-US/docs/Web/API/File_API)
+- [MDN — Blob.slice()](https://developer.mozilla.org/en-US/docs/Web/API/Blob/slice)
+- [MDN — DataView](https://developer.mozilla.org/en-US/docs/Web/API/DataView)
+- [OWASP — Unrestricted File Upload](https://owasp.org/www-community/vulnerabilities/Unrestricted_File_Upload)
+- [Wikipedia — List of file signatures](https://en.wikipedia.org/wiki/List_of_file_signatures)

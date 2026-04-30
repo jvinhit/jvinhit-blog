@@ -1,0 +1,904 @@
+---
+title: 'Frontend Caching toàn tập — Browser, CDN, Proxy, Service Worker'
+description: 'Đào sâu các tầng cache giữa user và origin: cache headers, browser memory/disk/bfcache, CDN edge, reverse proxy, Service Worker, và mọi pitfall thường gặp.'
+pubDate: 2026-04-30
+tags: [performance, caching, http, cdn, web-vitals, frontend]
+draft: false
+---
+
+Performance frontend được quyết định bởi 1 câu hỏi đơn giản: **request
+nào không phải gửi?** Bytes không truyền là bytes nhanh nhất. Round-trip
+không xảy ra là round-trip không tốn TLS handshake, không tốn TCP slow
+start, không tốn bandwidth user.
+
+Cache là **đòn bẩy lớn nhất** trong frontend perf — lớn hơn cả bundle
+size optimization, lớn hơn cả image format. Nhưng cache cũng là chỗ dễ
+sai nhất: cache sai thì user thấy version cũ cả tuần, cache không đủ
+thì server gánh load không cần thiết, cache nhầm response private thì
+data của user A leak sang user B.
+
+Bài này đi từ tầng thấp nhất (browser memory cache) lên tầng cao nhất
+(CDN edge), giải thích **mọi cache header HTTP**, các strategy thường
+dùng, và những pitfall tôi từng dẫm phải trong production.
+
+---
+
+## 1. Cache hierarchy — request đi qua những tầng nào
+
+Mỗi request từ browser đi qua một chuỗi các cache tier. Hit ở tầng càng
+sớm thì càng rẻ:
+
+```text
+ ┌────────────────────────────────────────────────────────────────────┐
+ │                          BROWSER (client)                          │
+ │  ┌──────────────┐   ┌─────────────┐   ┌───────────────────────┐    │
+ │  │ Memory cache │   │ Disk cache  │   │  Service Worker cache │    │
+ │  │   (~RAM)     │ ► │  (HTTP)     │ ► │  (programmable)       │    │
+ │  │   tab-life   │   │  persistent │   │  origin-life          │    │
+ │  └──────────────┘   └─────────────┘   └───────────────────────┘    │
+ └────────────────────────────────┬───────────────────────────────────┘
+                                  │ miss → network
+                                  ▼
+ ┌────────────────────────────────────────────────────────────────────┐
+ │                         SHARED CACHES                              │
+ │  ┌──────────────┐    ┌──────────────────────────┐                  │
+ │  │ Corporate /  │ ►  │ CDN edge (POP gần user)  │                  │
+ │  │ ISP proxy    │    │  Cloudflare / Fastly /   │                  │
+ │  │  (legacy)    │    │  CloudFront / Akamai     │                  │
+ │  └──────────────┘    └────────────┬─────────────┘                  │
+ │                                   │ miss → CDN tiered → origin     │
+ │                                   ▼                                │
+ │                       ┌────────────────────────┐                   │
+ │                       │ Reverse proxy / shield │                   │
+ │                       │ (Varnish, Nginx)       │                   │
+ │                       └────────────┬───────────┘                   │
+ └────────────────────────────────────┼───────────────────────────────┘
+                                      ▼
+                             ┌──────────────────┐
+                             │     ORIGIN       │
+                             │  (Node, Rails…)  │
+                             └──────────────────┘
+```
+
+Có 2 nhóm cache với property rất khác nhau:
+
+- **Private cache** (browser, SW): chỉ user đó dùng → có thể chứa data
+  cá nhân hóa.
+- **Shared cache** (CDN, proxy): nhiều user dùng chung → **tuyệt đối
+  không** được chứa data cá nhân (auth response, profile…).
+
+Phần lớn bug caching đến từ việc nhầm 2 nhóm này. `Cache-Control: public`
+trên một response chứa cookie session là cách kinh điển để leak data
+giữa user.
+
+---
+
+## 2. HTTP cache headers — chi tiết toàn bộ
+
+### 2.1. `Cache-Control` — header quan trọng nhất
+
+`Cache-Control` là source of truth hiện đại. Mọi directive đều có ý
+nghĩa riêng và **chỉ áp dụng cho đúng tầng cache nào đó**:
+
+| Directive               | Áp dụng | Ý nghĩa                                                           |
+| ----------------------- | ------- | ----------------------------------------------------------------- |
+| `public`                | Cả 2    | Cho phép shared cache (CDN, proxy) lưu                            |
+| `private`               | Browser | Chỉ browser được lưu, CDN phải bỏ qua                             |
+| `no-cache`              | Cả 2    | Lưu được, **nhưng phải revalidate** trước khi serve               |
+| `no-store`              | Cả 2    | **Không được lưu** ở bất kỳ tầng nào                              |
+| `max-age=N`             | Cả 2    | Coi response là fresh trong N giây                                |
+| `s-maxage=N`            | Shared  | Override `max-age` cho shared cache                               |
+| `must-revalidate`       | Cả 2    | Hết hạn rồi không được serve stale, phải revalidate               |
+| `immutable`             | Browser | Trong `max-age` không cần revalidate ngay cả khi user reload      |
+| `stale-while-revalidate=N` | Cả 2 | Sau khi expire, vẫn serve stale trong N giây + refresh background |
+| `stale-if-error=N`      | Cả 2    | Nếu origin error, serve stale trong N giây                        |
+| `no-transform`          | Cả 2    | Cấm proxy nén lại / chuyển format                                 |
+
+Một số combo phổ biến đáng nhớ:
+
+```http
+# 1. Static asset có fingerprint trong URL (app.a3f9.js)
+#    → cache 1 năm, bỏ qua revalidate. Đổi nội dung = đổi URL.
+Cache-Control: public, max-age=31536000, immutable
+
+# 2. HTML shell (index.html) — thay đổi mỗi deploy
+#    → không cache, luôn revalidate, nhưng cho phép stale ngắn nếu CDN miss
+Cache-Control: no-cache, must-revalidate
+
+# 3. API response GET không nhạy cảm (ví dụ: /api/products)
+#    → CDN edge cache 60s, browser 30s, fallback stale 10 phút khi origin lỗi
+Cache-Control: public, max-age=30, s-maxage=60, stale-while-revalidate=600, stale-if-error=600
+
+# 4. API response auth (cá nhân hóa)
+#    → chỉ browser cache, ngắn, không bao giờ shared
+Cache-Control: private, max-age=0, must-revalidate
+```
+
+### 2.2. `no-cache` ≠ "không cache"
+
+Đây là confusion phổ biến nhất. `no-cache` **vẫn cho lưu** — chỉ là phải
+revalidate (gửi conditional request kiểm tra ETag/Last-Modified) trước
+khi serve. Nếu muốn cấm tuyệt đối, phải dùng `no-store`.
+
+```text
+ no-cache     →  store OK, phải hỏi origin "còn fresh không?" trước serve
+ no-store     →  không bao giờ ghi vào cache
+ max-age=0    →  store OK, expire ngay → tương đương no-cache (cũ hơn)
+ max-age=0
+   + must-revalidate  → giống no-cache nhưng strict hơn về stale
+```
+
+### 2.3. `Expires` — legacy nhưng chưa chết
+
+`Expires: Sat, 30 Apr 2027 12:00:00 GMT` là HTTP/1.0. Khi cùng tồn tại
+với `Cache-Control: max-age`, **`max-age` thắng**. Lý do giữ `Expires`:
+một số corporate proxy cũ chỉ hiểu HTTP/1.0. Modern stack có thể bỏ qua.
+
+### 2.4. Validators — `ETag` và `Last-Modified`
+
+Khi response expire, browser không vứt cache đi ngay. Nó gửi
+**conditional request** kiểm tra origin:
+
+```http
+# Lần đầu: response chứa validator
+HTTP/1.1 200 OK
+ETag: "v3-c4ca4238a0b923820"
+Last-Modified: Tue, 28 Apr 2026 10:00:00 GMT
+Cache-Control: max-age=60
+
+# Sau 61s, browser revalidate:
+GET /api/products HTTP/1.1
+If-None-Match: "v3-c4ca4238a0b923820"
+If-Modified-Since: Tue, 28 Apr 2026 10:00:00 GMT
+
+# Origin nếu vẫn fresh trả về 304 KHÔNG body
+HTTP/1.1 304 Not Modified
+ETag: "v3-c4ca4238a0b923820"
+Cache-Control: max-age=60
+```
+
+**ETag** là string opaque — origin tự định nghĩa. Có 2 loại:
+
+- **Strong ETag** (`"abc123"`): byte-by-byte identical.
+- **Weak ETag** (`W/"abc123"`): semantic equivalent (ví dụ JSON cùng
+  data nhưng key order khác).
+
+Với JSON API, weak ETag là đủ và rẻ hơn. Tính ETag từ hash content:
+
+```ts
+// src/server/etag.ts
+// Compute weak ETag từ response body. Dùng SHA-1 truncate vì:
+// (1) collision-resistant đủ cho cache key (không phải security primitive),
+// (2) ngắn → header không phình, (3) nhanh hơn SHA-256 cho payload nhỏ.
+import { createHash } from 'node:crypto';
+
+export function weakETag(body: string | Buffer): string {
+  const hash = createHash('sha1').update(body).digest('base64url').slice(0, 22);
+  return `W/"${hash}"`;
+}
+
+// Express handler ví dụ
+export function withETag<T>(handler: () => Promise<T>) {
+  return async (req: Request, res: Response) => {
+    const data = await handler();
+    const body = JSON.stringify(data);
+    const etag = weakETag(body);
+
+    // Nếu client gửi If-None-Match khớp → 304, tiết kiệm payload.
+    if (req.headers['if-none-match'] === etag) {
+      res.status(304).end();
+      return;
+    }
+
+    res.setHeader('ETag', etag);
+    res.setHeader('Cache-Control', 'public, max-age=30, s-maxage=60');
+    res.json(data);
+  };
+}
+```
+
+Rule of thumb: **ETag chính xác hơn `Last-Modified`** vì timestamp chỉ
+có resolution 1 giây (HTTP date format). Nếu file đổi 2 lần trong cùng
+1 giây, `Last-Modified` không phát hiện được. Tuy vậy, `Last-Modified`
+rẻ hơn (không phải hash content) — phù hợp với static file lớn.
+
+### 2.5. `Vary` — chìa khóa để cache đúng theo client
+
+Cùng URL nhưng response khác nhau theo header request → phải dùng
+`Vary` để CDN biết tách thành các cache entry riêng:
+
+```http
+# Server trả gzip cho browser hỗ trợ, plain cho cũ
+Content-Encoding: gzip
+Vary: Accept-Encoding
+
+# Server trả ngôn ngữ theo Accept-Language
+Vary: Accept-Language
+
+# Trả mobile vs desktop layout
+Vary: User-Agent   ← NGUY HIỂM, đọc tiếp
+```
+
+Cảnh báo: **`Vary: User-Agent`** sẽ tạo cache entry cho **mỗi UA string
+unique** — và UA string có hàng triệu biến thể nhỏ → cache hit ratio
+sụp đổ. Thay vì vậy, normalize UA ở edge thành "mobile" / "desktop" rồi
+`Vary: X-Device-Type`.
+
+Tương tự `Vary: Cookie` rất nguy hiểm — mỗi cookie change tạo entry mới.
+
+### 2.6. Các header phụ trợ
+
+- **`Age`** (do CDN set): response đã ở cache bao lâu, đơn vị giây.
+  Browser tính freshness = `max-age - Age`.
+- **`Date`**: thời điểm origin tạo response. Dùng để tính `Age` khi
+  proxy không set.
+- **`Surrogate-Control`**: dành riêng cho CDN, browser bỏ qua. Cho phép
+  tách cấu hình "browser cache 30s, CDN 1 giờ" mà không cần `s-maxage`.
+- **`CDN-Cache-Control`**: chuẩn hóa mới (RFC 9213), một số CDN ưu tiên
+  trên `Surrogate-Control`.
+
+---
+
+## 3. Browser cache layers — không chỉ một
+
+Browser **không chỉ có 1 cache**. Có ít nhất 4 layer riêng biệt:
+
+| Layer            | Lifetime         | Speed       | Trigger                        |
+| ---------------- | ---------------- | ----------- | ------------------------------ |
+| Memory cache     | Tab session      | ~1ms        | Resource đã load lần này       |
+| Disk cache (HTTP)| Persistent       | ~10-50ms    | Cache-Control / Expires        |
+| Service Worker   | Programmable     | ~10ms       | Code điều khiển                |
+| BFCache          | Back/forward nav | ~instant    | Page snapshot trước khi rời    |
+
+### 3.1. Memory vs Disk cache
+
+Mở DevTools → Network, bạn sẽ thấy "from memory cache" hoặc "from disk
+cache". Sự khác nhau:
+
+- **Memory cache**: live trong tab. F5 thì còn, đóng tab thì mất.
+  Image, JS, CSS đã eval xong trong tab hiện tại lưu ở đây.
+- **Disk cache**: persistent, dùng chung giữa các tab cùng process.
+  Áp dụng quy tắc HTTP cache thông thường.
+
+Browser tự quyết định — bạn không control trực tiếp được. Tuy nhiên có
+thể nudge:
+
+- **`Cache-Control: immutable`**: ngay cả khi user reload, browser sẽ
+  không revalidate (memory hit hoặc disk hit thẳng).
+- Tránh `Pragma: no-cache` (HTTP/1.0 legacy).
+
+### 3.2. Back/forward cache (bfcache) — viên đạn bạc bị quên lãng
+
+Khi user click back, browser có thể **restore page từ snapshot trong
+RAM** thay vì re-render. Kết quả: navigation gần như instant, không
+fetch lại gì cả. Đây không phải HTTP cache — đây là cache **toàn bộ
+DOM + JS heap**.
+
+Điều kiện để bfcache work:
+
+- Không có `Cache-Control: no-store` ở document response.
+- Không dùng `unload` event (ngừng đi, dùng `pagehide` thay).
+- Không có outstanding IndexedDB transaction.
+- Không có WebSocket / WebRTC còn open.
+
+Test: thêm event listener và quan sát:
+
+```ts
+// src/lib/bfcache-debug.ts
+// Quan sát bfcache events. Đặt ở entry script để theo dõi rate hit/miss
+// trong production (gửi về analytics).
+window.addEventListener('pageshow', (e) => {
+  if (e.persisted) {
+    console.log('[bfcache] HIT — page restored from snapshot');
+  }
+});
+
+window.addEventListener('pagehide', (e) => {
+  // e.persisted = browser định lưu page vào bfcache.
+  // Nếu false: kiểm tra notRestoredReasons API (Chrome 105+) để debug.
+  if (!e.persisted) {
+    const reasons = (performance.getEntriesByType('navigation')[0] as any)
+      ?.notRestoredReasons;
+    if (reasons) console.warn('[bfcache] BLOCKED:', reasons);
+  }
+});
+```
+
+Một bug rất phổ biến: dev set `Cache-Control: no-store` cho HTML "để
+chắc chắn always fresh" → vô tình tắt bfcache → mọi back/forward đều
+phải re-render lại từ đầu. Dùng `no-cache` thay `no-store` cho HTML.
+
+---
+
+## 4. CDN edge cache — gần user nhất
+
+CDN (Cloudflare, Fastly, CloudFront, Akamai...) đặt server tại hàng
+trăm Point of Presence (POP) khắp thế giới. User Sài Gòn fetch sẽ chạm
+edge ở Singapore (~30ms RTT), không phải origin ở Iowa (~250ms RTT).
+
+### 4.1. Cache key
+
+CDN xác định "2 request có cùng cached response không" bằng **cache key**.
+Mặc định: `(method, host, path, query string)`. Có thể custom thêm:
+
+- Bỏ qua marketing query (`utm_*`, `fbclid`) → tăng hit ratio.
+- Include header chọn lọc (`Accept-Encoding`, `X-Device-Type`) thay vì
+  `Vary: Accept-Encoding` toàn bộ UA.
+- Strip cookies trừ session-critical ones.
+
+Ví dụ Cloudflare Workers normalize URL trước khi check cache:
+
+```ts
+// src/edge/normalize-cache-key.ts
+// Worker chạy ở edge, normalize URL trước khi check cache.
+// Loại bỏ tracking params giúp 10 user click 10 link UTM khác nhau
+// vẫn share cùng 1 cache entry → hit ratio từ ~40% lên ~85%.
+const TRACKING_PARAMS = [
+  'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
+  'fbclid', 'gclid', 'mc_cid', 'mc_eid', '_ga', 'ref',
+];
+
+export default {
+  async fetch(request: Request, env: unknown, ctx: ExecutionContext) {
+    const url = new URL(request.url);
+    for (const param of TRACKING_PARAMS) url.searchParams.delete(param);
+
+    const cacheKey = new Request(url.toString(), request);
+    const cache = caches.default;
+
+    let response = await cache.match(cacheKey);
+    if (!response) {
+      response = await fetch(request); // origin
+      // ctx.waitUntil để cache.put không block response trả về user.
+      ctx.waitUntil(cache.put(cacheKey, response.clone()));
+    }
+    return response;
+  },
+};
+```
+
+### 4.2. Stale-while-revalidate ở edge
+
+`stale-while-revalidate` (SWR) cho phép edge **trả ngay response stale**
+cho user trong khi async fetch về origin. User không bao giờ chờ origin
+ngoại trừ lần đầu cold.
+
+```text
+                       fresh window         stale-while-revalidate window
+                    │◄─── 60s ───────►│◄────── 600s ──────►│
+ user req at t=0    │ HIT (fresh)     │                    │
+ user req at t=50   │ HIT (fresh)     │                    │
+ user req at t=80   │                 │ HIT (stale)        │  ← serve stale
+                    │                 │  + bg revalidate   │  ← refresh edge
+ user req at t=85   │                 │ HIT (now fresh)    │
+ user req at t=700  │                 │                    │ MISS → origin
+```
+
+Cấu hình điển hình:
+
+```http
+Cache-Control: public, max-age=60, s-maxage=60, stale-while-revalidate=600, stale-if-error=86400
+```
+
+Đọc: "browser fresh 60s, edge fresh 60s, sau đó edge serve stale tới
+10 phút trong khi background refresh, và nếu origin chết edge serve
+stale tới 1 ngày." Đây là một trong những combo cấu hình mạnh nhất
+cho API content-heavy.
+
+### 4.3. Purging — hủy cache khi data đổi
+
+3 chiến lược chính:
+
+| Cơ chế             | Latency  | Granularity  | Cost         |
+| ------------------ | -------- | ------------ | ------------ |
+| URL purge          | ~vài giây| Per-URL      | Rẻ           |
+| Tag-based purge    | ~vài giây| Per-resource | Cần plan tốt |
+| Soft purge         | 0        | Toàn bộ      | Không downtime |
+
+**Tag-based purge** (Fastly / Cloudflare Enterprise) là kỹ thuật mạnh
+nhất: mỗi response gắn `Surrogate-Key: product-123 category-shoes`,
+khi product 123 đổi giá thì purge bằng 1 API call:
+
+```ts
+// src/server/cache-tags.ts
+// Khi serve response, gắn surrogate keys liên quan. Khi data đổi,
+// chỉ cần purge by key — không cần track URL nào đã cache.
+export function tagResponse(res: Response, tags: string[]) {
+  // Surrogate-Key dùng space delimiter, không có format chuẩn nhưng
+  // Fastly và Cloudflare Enterprise đều hiểu vậy.
+  res.setHeader('Surrogate-Key', tags.join(' '));
+}
+
+// Example: product detail page
+tagResponse(res, [
+  `product-${product.id}`,
+  `category-${product.categoryId}`,
+  `vendor-${product.vendorId}`,
+]);
+
+// Khi update product → purge tag duy nhất, không quan tâm URL nào dính.
+async function purgeProductCache(productId: string) {
+  await fetch(`https://api.fastly.com/service/${SERVICE_ID}/purge/product-${productId}`, {
+    method: 'POST',
+    headers: { 'Fastly-Key': API_KEY },
+  });
+}
+```
+
+**Soft purge**: thay vì xoá thẳng, mark response là expired ngay → SWR
+serve stale tới user trong khi origin được fetch lại. **0 downtime**,
+0 origin spike — đây là default nên dùng cho production.
+
+---
+
+## 5. Reverse proxy — CDN tự host
+
+Trước thời CDN-as-a-service, các site lớn dùng **Varnish** đặt trước
+origin. Vẫn dùng nhiều khi:
+
+- Privacy / on-prem (không thể đẩy data ra third-party CDN).
+- Dynamic content cần custom logic mà CDN edge worker không đủ.
+- Cost tối ưu hơn ở scale rất lớn.
+
+Một Varnish VCL đơn giản:
+
+```vcl
+# /etc/varnish/default.vcl
+sub vcl_recv {
+    # Strip cookies cho asset tĩnh — cookie không ảnh hưởng response,
+    # giữ cookie sẽ làm Varnish bypass cache (default behavior).
+    if (req.url ~ "\.(jpg|jpeg|png|gif|webp|css|js|woff2)$") {
+        unset req.http.Cookie;
+    }
+}
+
+sub vcl_backend_response {
+    # Edge giữ asset 1 ngày kể cả khi origin set ngắn hơn.
+    # (s-maxage thắng max-age cho shared cache.)
+    if (bereq.url ~ "\.(jpg|jpeg|png|gif|webp)$") {
+        set beresp.ttl = 1d;
+    }
+
+    # Grace mode: serve stale tới 1 giờ khi origin down.
+    set beresp.grace = 1h;
+}
+```
+
+Nginx cũng làm reverse-proxy cache được, nhưng kém linh hoạt hơn Varnish
+ở mảng key/grace logic.
+
+---
+
+## 6. Service Worker — cache lập trình được
+
+Service Worker là **HTTP cache mà bạn code được**. Browser tự nó cache
+theo header; SW cho phép bạn override hoàn toàn — bao gồm offline,
+strategy phức tạp, và cache asset không có cache header tốt.
+
+```ts
+// public/sw.ts (compile xuống public/sw.js)
+// SW sống ở scope của origin, persistence không bị ảnh hưởng bởi
+// Cache-Control của resource. Đây là "cache last resort" cho offline.
+declare const self: ServiceWorkerGlobalScope;
+
+const VERSION = 'v3';
+const STATIC_CACHE = `static-${VERSION}`;
+const RUNTIME_CACHE = `runtime-${VERSION}`;
+
+const PRECACHE_URLS = [
+  '/',
+  '/offline.html',
+  '/_astro/app.css',
+  '/_astro/app.js',
+];
+
+self.addEventListener('install', (event) => {
+  // skipWaiting: SW mới active ngay, không chờ tab cũ đóng.
+  // Trade-off: page đang load có thể bị mismatch nếu asset mới khác cũ.
+  // Chỉ dùng skipWaiting khi versioning đảm bảo backward compat.
+  event.waitUntil(
+    caches.open(STATIC_CACHE).then((c) => c.addAll(PRECACHE_URLS))
+  );
+});
+
+self.addEventListener('activate', (event) => {
+  // Dọn cache cũ khi version đổi. Quan trọng — không có bước này thì
+  // disk fill dần từng deploy.
+  event.waitUntil(
+    caches.keys().then((keys) =>
+      Promise.all(
+        keys
+          .filter((k) => !k.endsWith(VERSION))
+          .map((k) => caches.delete(k))
+      )
+    )
+  );
+  self.clients.claim();
+});
+
+// Routing strategy: chọn theo loại resource
+self.addEventListener('fetch', (event) => {
+  const url = new URL(event.request.url);
+
+  // Asset có fingerprint → cache-first (nội dung không bao giờ đổi).
+  if (url.pathname.startsWith('/_astro/')) {
+    event.respondWith(cacheFirst(event.request, STATIC_CACHE));
+    return;
+  }
+
+  // HTML → network-first với fallback offline.
+  if (event.request.mode === 'navigate') {
+    event.respondWith(networkFirst(event.request, RUNTIME_CACHE));
+    return;
+  }
+
+  // API → stale-while-revalidate.
+  if (url.pathname.startsWith('/api/')) {
+    event.respondWith(staleWhileRevalidate(event.request, RUNTIME_CACHE));
+  }
+});
+
+async function cacheFirst(req: Request, cacheName: string): Promise<Response> {
+  const cached = await caches.match(req);
+  if (cached) return cached;
+  const res = await fetch(req);
+  // Chỉ cache 200 OK + same-origin, tránh cache CORS error.
+  if (res.ok) {
+    const cache = await caches.open(cacheName);
+    cache.put(req, res.clone());
+  }
+  return res;
+}
+
+async function networkFirst(req: Request, cacheName: string): Promise<Response> {
+  try {
+    const res = await fetch(req);
+    const cache = await caches.open(cacheName);
+    cache.put(req, res.clone());
+    return res;
+  } catch {
+    const cached = await caches.match(req);
+    return cached ?? caches.match('/offline.html') as Promise<Response>;
+  }
+}
+
+async function staleWhileRevalidate(
+  req: Request,
+  cacheName: string
+): Promise<Response> {
+  const cache = await caches.open(cacheName);
+  const cached = await cache.match(req);
+  // Background revalidate — không await, để cache hit trả ngay lập tức.
+  const networkPromise = fetch(req).then((res) => {
+    if (res.ok) cache.put(req, res.clone());
+    return res;
+  });
+  return cached ?? networkPromise;
+}
+```
+
+Pitfall hay gặp với SW:
+
+- **SW stuck**: deploy version mới nhưng user cũ vẫn dùng SW cũ vì
+  browser chỉ check SW update mỗi 24h hoặc khi navigate. Set
+  `updateViaCache: 'none'` ở registration:
+
+  ```ts
+  navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' });
+  ```
+
+- **HTML cache by SW** không có chiến lược version → user kẹt UI cũ.
+  Network-first cho HTML là default an toàn.
+- **Cache không bao giờ giải phóng**: thêm `caches.delete()` cho old
+  version trong `activate`.
+
+---
+
+## 7. Application storage — không phải HTTP cache
+
+Đây là storage do **app code** quản lý, hoàn toàn không liên quan HTTP
+cache. So sánh:
+
+| Storage           | Quota   | Sync? | Persist | Use case                           |
+| ----------------- | ------- | ----- | ------- | ---------------------------------- |
+| `localStorage`    | ~5MB    | Sync  | Yes     | User prefs, theme, feature flags   |
+| `sessionStorage`  | ~5MB    | Sync  | Tab only| Form state trong tab               |
+| `IndexedDB`       | ~50% disk| Async | Yes    | Large structured data, offline DB  |
+| `Cache API`       | ~50% disk| Async | Yes    | Response objects (dùng với SW)     |
+| `cookies`         | ~4KB    | Sync  | Yes     | Auth, sent với every request       |
+
+Quy tắc:
+
+- **`localStorage` block main thread** — đừng đọc/ghi >100KB ở đó.
+- **IndexedDB cho data có cấu trúc** — query indexed, dùng `idb` lib
+  để tránh callback hell.
+- **Cache API + SW** cho response — không phải data tự do.
+- **Cookie** chỉ cho auth/session — dùng `Secure`, `HttpOnly`, `SameSite=Strict`.
+
+```ts
+// src/lib/local-cache.ts
+// Cache layer cho client-side data (e.g. user prefs, feature flags).
+// In-memory + IDB fallback. Tránh localStorage cho data lớn vì block UI.
+import { openDB, type IDBPDatabase } from 'idb';
+
+interface CacheEntry<T> {
+  value: T;
+  expiresAt: number;
+}
+
+let dbPromise: Promise<IDBPDatabase> | null = null;
+function getDb() {
+  if (!dbPromise) {
+    dbPromise = openDB('app-cache', 1, {
+      upgrade(db) {
+        db.createObjectStore('kv');
+      },
+    });
+  }
+  return dbPromise;
+}
+
+const memory = new Map<string, CacheEntry<unknown>>();
+
+export async function set<T>(key: string, value: T, ttlMs: number): Promise<void> {
+  const entry: CacheEntry<T> = { value, expiresAt: Date.now() + ttlMs };
+  memory.set(key, entry);
+  // IDB write async — không block UI.
+  const db = await getDb();
+  await db.put('kv', entry, key);
+}
+
+export async function get<T>(key: string): Promise<T | undefined> {
+  // Memory tier trước cho hit nóng (~0.01ms vs IDB ~5-20ms).
+  const mem = memory.get(key) as CacheEntry<T> | undefined;
+  if (mem && mem.expiresAt > Date.now()) return mem.value;
+
+  const db = await getDb();
+  const entry = (await db.get('kv', key)) as CacheEntry<T> | undefined;
+  if (!entry || entry.expiresAt <= Date.now()) return undefined;
+
+  memory.set(key, entry);
+  return entry.value;
+}
+```
+
+---
+
+## 8. Cache strategies — bảng quyết định
+
+| Strategy                  | Khi nào dùng                                          | Pros                       | Cons                          |
+| ------------------------- | ----------------------------------------------------- | -------------------------- | ----------------------------- |
+| Cache-first               | Asset immutable (CSS/JS bundle với fingerprint)       | Cực nhanh, offline OK      | Stale data nếu config sai     |
+| Network-first             | HTML, content thường xuyên đổi                        | Luôn fresh                 | Chậm khi network kém          |
+| Stale-while-revalidate    | API content-heavy, list page                          | Fast + eventually fresh    | User có thể thấy data cũ ~giây |
+| Network-only              | Auth, payment, write request                          | Không bao giờ stale        | 0 offline, cao latency        |
+| Cache-only                | Pre-cached offline pack                               | Hoạt động không cần network | Phải prepare trước            |
+| Race (network + cache)    | UX critical (search suggestions)                      | Nhanh nhất có thể          | 2x request                    |
+
+Một implementation race strategy:
+
+```ts
+// src/lib/race-cache.ts
+// Trả về kết quả nào xong trước giữa network và cache. Hữu ích cho
+// UI critical như search-as-you-type: nếu cache miss, không phải chờ;
+// nếu network slow, cache vẫn thắng.
+export async function raceCache(
+  request: Request,
+  cache: Cache
+): Promise<Response> {
+  const cached = cache.match(request);
+  const network = fetch(request);
+
+  // Promise.any resolve ở promise đầu tiên non-undefined non-error.
+  // cache.match resolve undefined nếu miss → loại khỏi race, network thắng.
+  return Promise.any([
+    cached.then((res) => res ?? Promise.reject(new Error('cache miss'))),
+    network,
+  ]);
+}
+```
+
+---
+
+## 9. Cache invalidation — bài toán khó nhất CS
+
+Phil Karlton:
+
+> There are only two hard things in Computer Science: cache invalidation
+> and naming things.
+
+3 kỹ thuật phổ biến:
+
+### 9.1. Fingerprint URLs (content-addressable)
+
+Build tool nhúng hash của content vào URL: `app.a3f9e7c.js`. Asset đổi
+nội dung → đổi URL. Cache cũ tự động mất hiệu lực vì không ai request
+URL cũ nữa.
+
+Cấu hình Vite/Astro mặc định đã làm việc này. Cộng với
+`Cache-Control: max-age=31536000, immutable` là combo perfect cho
+static asset.
+
+### 9.2. Cache busting bằng query string
+
+`/api/products?v=42` — version bump mỗi deploy. Đơn giản nhưng có vài
+gotcha:
+
+- Một số corporate proxy cũ ignore query string trong cache key.
+- Tạo cache pollution nếu bump version quá thường xuyên.
+
+Modern hơn: dùng version trong URL path (`/v3/api/products`).
+
+### 9.3. Active purge
+
+Khi data đổi, gọi API CDN purge:
+
+```ts
+// src/lib/cache-invalidate.ts
+// Trigger purge khi data đổi. Pattern: "purge tag, không purge URL"
+// vì 1 thay đổi data thường ảnh hưởng nhiều URL (list page, detail
+// page, search result, related products...).
+import type { Tag } from './tags';
+
+export async function purgeByTag(tags: Tag[]): Promise<void> {
+  // Purge non-blocking — không await response. Nếu CDN chậm, không
+  // delay user write request. Worst case: cache cũ thêm vài giây.
+  await Promise.allSettled(
+    tags.map((tag) =>
+      fetch(`https://api.fastly.com/service/${SERVICE_ID}/purge/${tag}`, {
+        method: 'POST',
+        headers: { 'Fastly-Key': process.env.FASTLY_API_KEY! },
+      })
+    )
+  );
+}
+```
+
+---
+
+## 10. Pitfalls — những sai lầm tôi đã trả giá
+
+### 10.1. `Vary: Cookie` trên CDN
+
+Cookie có session ID → mỗi user 1 cache entry → CDN cache hit ratio
+~0%. Origin chịu toàn bộ load. Fix: trước khi forward về origin,
+**strip cookie ở edge** với asset tĩnh, hoặc cache key whitelist chỉ
+cookie nào thực sự ảnh hưởng response.
+
+### 10.2. `Cache-Control: public` trên trang có session
+
+Edge cache HTML chứa username, email. User B request cùng URL → nhận
+cache của user A. **Đây là data leak nghiêm trọng**, đã từng xảy ra ở
+nhiều site lớn (Steam 2015, Pizza Hut, Vodafone…). Rule: trang nào có
+session → bắt buộc `private` hoặc dynamic không cache.
+
+### 10.3. SW không update sau deploy
+
+User cũ vẫn dùng JS cũ trong khi backend đã thay đổi schema → API
+incompat → blank page. Chiến lược:
+
+- HTML luôn `network-first` — đảm bảo user nhận shell mới sau deploy.
+- SW lifecycle: `skipWaiting()` + `clients.claim()` để rollover nhanh.
+- Có endpoint `/version.json` để client check + force reload nếu
+  version mismatch (defense in depth).
+
+### 10.4. ETag không stable giữa nhiều origin server
+
+Origin có 2 instance, mỗi instance hash file theo timestamp khác → cùng
+URL nhưng 2 ETag khác nhau → revalidate fail liên tục, browser luôn
+re-download. Fix: hash từ content, không phải metadata file.
+
+### 10.5. `no-store` cho HTML → tắt bfcache
+
+Đã nói ở section 3.2. Lặp lại vì quá phổ biến. Dùng `no-cache` chứ đừng
+dùng `no-store` cho HTML.
+
+### 10.6. Image với cookie domain
+
+Asset host trên cùng cookie domain → mỗi image request gửi 4KB cookie
+→ tốn bandwidth + CDN không cache (vì `Vary: Cookie` ngầm). Fix: serve
+asset từ cookieless subdomain (`cdn.example.com`) hoặc hoàn toàn
+domain khác.
+
+---
+
+## 11. Cấu hình thực tế cho từng loại resource
+
+Cheat sheet để copy-paste:
+
+| Resource                    | Cache-Control                                                                | Note                          |
+| --------------------------- | ---------------------------------------------------------------------------- | ----------------------------- |
+| HTML shell                  | `no-cache`                                                                   | Revalidate mỗi request        |
+| JS/CSS bundle (fingerprint) | `public, max-age=31536000, immutable`                                        | 1 năm, không revalidate       |
+| Image (fingerprint)         | `public, max-age=31536000, immutable`                                        | Như trên                      |
+| Image (no fingerprint)      | `public, max-age=86400, stale-while-revalidate=604800`                       | 1 ngày fresh, 1 tuần stale    |
+| Font (woff2)                | `public, max-age=31536000, immutable`                                        | Font hiếm khi đổi             |
+| API public list             | `public, max-age=30, s-maxage=60, stale-while-revalidate=600`                | SWR pattern                   |
+| API user-specific           | `private, max-age=0, must-revalidate`                                        | Browser only, ETag revalidate |
+| API mutation (POST/PUT)     | `no-store`                                                                   | Không cache write             |
+| robots.txt / sitemap.xml    | `public, max-age=3600`                                                       | Cập nhật vừa phải             |
+
+Cấu hình Astro/Vite mặc định cho asset hash + Nginx/Cloudfront serving:
+
+```nginx
+# /etc/nginx/conf.d/cache.conf
+# 2 location block riêng vì hash assets có URL pattern riêng.
+location ~* /_astro/ {
+    add_header Cache-Control "public, max-age=31536000, immutable";
+    access_log off;
+}
+
+location = /index.html {
+    add_header Cache-Control "no-cache";
+}
+
+# API forward về Node, để upstream control header.
+location /api/ {
+    proxy_pass http://localhost:3000;
+    # Strip Set-Cookie ở response để CDN trên front có thể cache GET.
+    proxy_hide_header Set-Cookie;
+}
+```
+
+---
+
+## 12. Đo lường — không đo thì không tối ưu được
+
+3 metric bắt buộc theo dõi:
+
+- **Cache hit ratio** ở CDN dashboard. Mục tiêu: 90%+ cho asset, 70%+
+  cho HTML, 50%+ cho API.
+- **Time to First Byte (TTFB)**: phản ánh edge serve nhanh hay phải fall
+  back về origin. Mục tiêu: &lt;200ms p75.
+- **Repeat view performance** trong [WebPageTest](https://www.webpagetest.org/)
+  hoặc [PageSpeed Insights](https://pagespeed.web.dev/) — đại diện
+  trải nghiệm user quay lại.
+
+Quan sát từ DevTools:
+
+```text
+ Network panel → Size column:
+  "(disk cache)"     → HTTP cache hit (disk tier)
+  "(memory cache)"   → HTTP cache hit (RAM tier, tab session)
+  "(ServiceWorker)"  → SW cache hit
+  "(prefetch cache)" → speculation hit từ <link rel="prefetch">
+  số bytes thực      → network hit (revalidate hoặc full download)
+```
+
+---
+
+## 13. Kết luận — checklist trước khi ship
+
+1. **Static asset có fingerprint chưa?** → `immutable, max-age=31536000`.
+2. **HTML shell** → `no-cache` (không phải `no-store`).
+3. **API public** → SWR pattern + ETag.
+4. **API private** → `private, max-age=0` + ETag.
+5. **CDN có strip tracking params không?** Nếu chưa, hit ratio đang
+   thấp hơn nó có thể.
+6. **bfcache có active không?** Test bằng `e.persisted`.
+7. **SW có chiến lược version + cleanup?** Hay đang fill disk vô tận?
+8. **Có monitor cache hit ratio chưa?** &lt; 70% là red flag.
+9. **Trang có session không bị `public`?** Audit lần cuối.
+10. **Image / font có ở cookieless domain?** Mỗi cookie là 4KB lãng phí.
+
+Cache là chỗ trade-off giữa **freshness** (data mới đến tay user nhanh)
+và **performance** (request không cần gửi). Không có cấu hình "đúng"
+universal — phụ thuộc vào content nào, audience nào, business
+constraint nào. Nhưng các nguyên tắc trong bài này là baseline mọi
+frontend system đều cần.
+
+> Cached request không phải là request fast — nó là request **không
+> tồn tại**. Đó là level optimization mà mọi CDN, mọi bundler tối ưu
+> kế tiếp đều phải vác mặt nhìn lên.
+
+---
+
+**Tham khảo:**
+
+- [RFC 9111 — HTTP Caching](https://www.rfc-editor.org/rfc/rfc9111)
+- [RFC 9213 — CDN-Cache-Control](https://www.rfc-editor.org/rfc/rfc9213)
+- [MDN — HTTP caching](https://developer.mozilla.org/en-US/docs/Web/HTTP/Caching)
+- [MDN — Service Worker API](https://developer.mozilla.org/en-US/docs/Web/API/Service_Worker_API)
+- [web.dev — Back/forward cache](https://web.dev/articles/bfcache)
+- [Fastly — Surrogate-Control header](https://docs.fastly.com/en/guides/working-with-surrogate-keys)
+- [Cloudflare — Cache everything](https://developers.cloudflare.com/cache/)

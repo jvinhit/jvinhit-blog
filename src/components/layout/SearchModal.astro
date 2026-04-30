@@ -38,83 +38,91 @@ const indexUrl = withBase('/search.json');
   id="search-dialog"
   data-search-dialog
   aria-labelledby="search-dialog-title"
-  class="mx-auto mt-[20vh] mb-auto w-full max-w-[640px] border border-[var(--color-border-strong)] bg-[var(--color-surface)] p-0 text-[var(--color-fg)] shadow-[0_24px_60px_-12px_rgba(0,0,0,0.7)] backdrop:bg-black/70 backdrop:backdrop-blur-sm sm:rounded-md"
+  class="mx-auto mt-[20vh] mb-auto w-full max-w-[640px] rounded-md border border-[var(--color-border-strong)] bg-[var(--color-surface)] p-0 text-[var(--color-fg)] shadow-[0_24px_60px_-12px_rgba(0,0,0,0.7)] backdrop:bg-black/70 backdrop:backdrop-blur-sm max-sm:m-0 max-sm:h-[100dvh] max-sm:max-h-none max-sm:max-w-none max-sm:rounded-none max-sm:border-0 max-sm:shadow-none"
 >
   <h2 id="search-dialog-title" class="sr-only">Search posts</h2>
 
-  <form
-    role="search"
-    data-search-form
-    class="flex items-center gap-3 border-b border-[var(--color-border)] px-4 py-3"
-  >
-    <Search
-      class="h-4 w-4 shrink-0 text-[var(--color-fg-muted)]"
-      aria-hidden="true"
-    />
-    <input
-      type="search"
-      data-search-input
-      data-index-url={indexUrl}
-      placeholder="Search title, content, or tags..."
-      autocomplete="off"
-      autocapitalize="off"
-      spellcheck="false"
-      enterkeyhint="search"
-      aria-label="Search query"
-      aria-controls="search-results"
-      aria-autocomplete="list"
-      class="w-full bg-transparent font-[inherit] text-sm text-[var(--color-fg)] placeholder:text-[var(--color-fg-subtle)] focus:outline-none [&::-webkit-search-cancel-button]:hidden"
-    />
-    <button
-      type="button"
-      data-search-close
-      aria-label="Close search"
-      class="hidden h-6 cursor-pointer items-center justify-center rounded-xs border border-[var(--color-border)] px-1.5 font-[inherit] text-[10px] font-semibold tracking-wider text-[var(--color-fg-muted)] transition-colors hover:text-[var(--color-fg)] sm:inline-flex"
+  {/* Flex-col wrapper:
+      - Desktop: auto height ⇒ sums theo content (form + body + footer).
+      - Mobile (max-sm:h-full): fill 100% dialog (= 100dvh) ⇒ body flex-1 grow.
+      Tránh `display: contents` vì một số browser có quirk với <form> con. */}
+  <div class="flex flex-col max-sm:h-full">
+    <form
+      role="search"
+      data-search-form
+      class="flex shrink-0 items-center gap-3 border-b border-[var(--color-border)] px-4 py-3 max-sm:pt-[max(env(safe-area-inset-top),0.75rem)]"
     >
-      ESC
-    </button>
-    <button
-      type="button"
-      data-search-close
-      aria-label="Close search"
-      class="inline-flex h-8 w-8 cursor-pointer items-center justify-center text-[var(--color-fg-muted)] transition-colors hover:text-[var(--color-fg)] sm:hidden"
-    >
-      <XIcon class="h-4 w-4" aria-hidden="true" />
-    </button>
-  </form>
+      <Search
+        class="h-4 w-4 shrink-0 text-[var(--color-fg-muted)]"
+        aria-hidden="true"
+      />
+      <input
+        type="search"
+        data-search-input
+        data-index-url={indexUrl}
+        placeholder="Search posts..."
+        autocomplete="off"
+        autocapitalize="off"
+        spellcheck="false"
+        enterkeyhint="search"
+        aria-label="Search query"
+        aria-controls="search-results"
+        aria-autocomplete="list"
+        class="w-full bg-transparent font-[inherit] text-sm text-[var(--color-fg)] placeholder:text-[var(--color-fg-subtle)] focus:outline-none max-sm:text-base [&::-webkit-search-cancel-button]:hidden"
+      />
+      <button
+        type="button"
+        data-search-close
+        aria-label="Close search"
+        class="inline-flex h-6 cursor-pointer items-center justify-center rounded-xs border border-[var(--color-border)] px-1.5 font-[inherit] text-[10px] font-semibold tracking-wider text-[var(--color-fg-muted)] transition-colors hover:text-[var(--color-fg)] max-sm:hidden"
+      >
+        ESC
+      </button>
+      <button
+        type="button"
+        data-search-close
+        aria-label="Close search"
+        class="-mr-2 hidden h-11 w-11 shrink-0 cursor-pointer items-center justify-center text-[var(--color-fg-muted)] transition-colors hover:text-[var(--color-fg)] max-sm:inline-flex"
+      >
+        <XIcon class="h-5 w-5" aria-hidden="true" />
+      </button>
+    </form>
 
-  <div
-    id="search-results"
-    data-search-body
-    role="listbox"
-    aria-label="Search results"
-    class="max-h-[60vh] min-h-[120px] overflow-y-auto px-2 py-2"
-  >
-    <p
-      data-search-empty
-      class="px-3 py-8 text-center text-xs text-[var(--color-fg-muted)]"
+    <div
+      id="search-results"
+      data-search-body
+      role="listbox"
+      aria-label="Search results"
+      class="max-h-[60vh] min-h-[120px] overflow-y-auto overscroll-contain px-2 py-2 max-sm:max-h-none max-sm:flex-1 max-sm:pb-[max(env(safe-area-inset-bottom),0.5rem)]"
     >
-      Type to search across journal entries.
-    </p>
+      <p
+        data-search-empty
+        class="px-3 py-8 text-center text-xs text-[var(--color-fg-muted)]"
+      >
+        Type to search across journal entries.
+      </p>
+    </div>
+
+    {/* Keyboard hints chỉ có ý nghĩa trên desktop — ẩn hẳn trên mobile để
+        khỏi chiếm chỗ + tránh confuse user touch-only. */}
+    <footer
+      class="flex shrink-0 flex-wrap items-center justify-end gap-3 border-t border-[var(--color-border)] px-4 py-2 text-[10px] tracking-wider text-[var(--color-fg-subtle)] uppercase max-sm:hidden"
+    >
+      <span class="inline-flex items-center gap-1">
+        <kbd class="rounded-xs border border-[var(--color-border)] px-1 font-[inherit]">↑</kbd>
+        <kbd class="rounded-xs border border-[var(--color-border)] px-1 font-[inherit]">↓</kbd>
+        navigate
+      </span>
+      <span class="inline-flex items-center gap-1">
+        <kbd class="rounded-xs border border-[var(--color-border)] px-1 font-[inherit]">↵</kbd>
+        open
+      </span>
+      <span class="inline-flex items-center gap-1">
+        <kbd class="rounded-xs border border-[var(--color-border)] px-1 font-[inherit]">esc</kbd>
+        close
+      </span>
+    </footer>
   </div>
-
-  <footer
-    class="flex flex-wrap items-center justify-end gap-3 border-t border-[var(--color-border)] px-4 py-2 text-[10px] tracking-wider text-[var(--color-fg-subtle)] uppercase"
-  >
-    <span class="hidden items-center gap-1 sm:inline-flex">
-      <kbd class="rounded-xs border border-[var(--color-border)] px-1 font-[inherit]">↑</kbd>
-      <kbd class="rounded-xs border border-[var(--color-border)] px-1 font-[inherit]">↓</kbd>
-      navigate
-    </span>
-    <span class="hidden items-center gap-1 sm:inline-flex">
-      <kbd class="rounded-xs border border-[var(--color-border)] px-1 font-[inherit]">↵</kbd>
-      open
-    </span>
-    <span class="inline-flex items-center gap-1">
-      <kbd class="rounded-xs border border-[var(--color-border)] px-1 font-[inherit]">esc</kbd>
-      close
-    </span>
-  </footer>
 </dialog>
 
 <style is:global>
@@ -156,6 +164,15 @@ const indexUrl = withBase('/search.json');
   dialog[data-search-dialog]::backdrop {
     /* Animation graceful nếu trình duyệt hỗ trợ. */
     transition: opacity 120ms ease-out;
+  }
+
+  /* Fallback height cho iOS < 15.4 không hiểu `100dvh`. Tailwind arbitrary
+     value `h-[100dvh]` chỉ emit một property nên không tự fallback được. */
+  @media (max-width: 639px) {
+    dialog[data-search-dialog][open] {
+      height: 100vh;
+      height: 100dvh;
+    }
   }
 </style>
 
@@ -520,10 +537,10 @@ const indexUrl = withBase('/search.json');
               data-index="${i}"
               data-active="${active}"
               aria-selected="${active}"
-              class="relative block rounded-xs px-3 py-2.5 focus:outline-none"
+              class="relative block rounded-xs px-3 py-2.5 focus:outline-none max-sm:py-3"
             >
-              <div class="text-sm font-medium text-[var(--color-fg)]">${highlight(item.title, tokens)}</div>
-              <div class="mt-1 line-clamp-2 text-xs leading-relaxed text-[var(--color-fg-muted)]">${highlight(item.snippet, tokens)}</div>
+              <div class="text-sm font-medium text-[var(--color-fg)] max-sm:text-[15px] max-sm:leading-snug">${highlight(item.title, tokens)}</div>
+              <div class="mt-1 line-clamp-2 text-xs leading-relaxed text-[var(--color-fg-muted)] max-sm:text-[13px]">${highlight(item.snippet, tokens)}</div>
               ${tagsHtml}
             </a>
           `;
