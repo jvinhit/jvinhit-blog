@@ -1,15 +1,14 @@
 ---
-// `Props` được Astro magic-reference để type-check `<Container .../>` ở
-// caller. `astro check` strict không nhận diện reference ngầm đó → flag
-// ts(6196). Tham chiếu tường minh qua `Astro.props as Props` vừa giữ
-// caller-side inference (ts(2322) không bùng) vừa "use" Props ở runtime
-// để tắt warning.
-interface Props {
+// `export interface Props` — Astro vẫn dùng để type-check caller, đồng thời
+// `export` đếm là "used" với TS strict → không trigger ts(6196). KHÔNG dùng
+// `Astro.props as Props` cast vì gây crash trong `GetPropsType` của compiler
+// WASM (compiler scan literal `Astro.props`, không hiểu cast expression).
+export interface Props {
   as?: 'div' | 'section' | 'article' | 'main';
   class?: string;
 }
 
-const { as: Tag = 'div', class: className = '' } = Astro.props as Props;
+const { as: Tag = 'div', class: className = '' } = Astro.props;
 ---
 
 <Tag class:list={['mx-auto w-full max-w-[1184px] px-6 sm:px-10', className]}>
