@@ -80,7 +80,12 @@ import { ArrowUp } from '@lucide/astro';
       return;
     }
 
-    const observer = new IntersectionObserver(([entry]) => {
+    const observer = new IntersectionObserver((entries) => {
+      // IO callback luôn có ≥1 entry cho mỗi observed target, nhưng dưới
+      // `noUncheckedIndexedAccess` TS coi index access là possibly undefined
+      // → guard tường minh thay vì destructure.
+      const entry = entries[0];
+      if (!entry) return;
       // Sentinel intersecting → user vẫn còn trong khoảng top → ẩn button.
       setVisible(!entry.isIntersecting);
     });
