@@ -1,10 +1,45 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
+import { copyFile } from 'node:fs/promises';
 import mdx from '@astrojs/mdx';
 import sitemap from '@astrojs/sitemap';
 import tailwindcss from '@tailwindcss/vite';
 
 import { SITE } from './src/lib/site-config';
+
+/**
+ * Plugin `@astrojs/sitemap` mặc định ghi 2 file:
+ *   - `sitemap-index.xml`  — index trỏ tới các sitemap con
+ *   - `sitemap-0.xml`      — flat list URL thật
+ *
+ * Nhiều tool / crawler (Bing Webmaster, một số SEO scanner) dò mặc định
+ * filename `sitemap.xml` — ta tạo thêm 1 alias là **bản copy của
+ * `sitemap-0.xml`** (flat list), KHÔNG phải của `sitemap-index.xml`.
+ * Lý do: file flat đọc được trực tiếp không cần fetch tiếp, tiện cho
+ * tool / agent đọc 1-shot. Index file giữ nguyên cho site lớn vượt
+ * 50K URL sau này (plugin sẽ tự shard `sitemap-1.xml`, `sitemap-2.xml`).
+ *
+ * @returns {import('astro').AstroIntegration}
+ */
+function copySitemapAlias() {
+  return {
+    name: 'copy-sitemap-alias',
+    hooks: {
+      'astro:build:done': async ({ dir, logger }) => {
+        const src = new URL('sitemap-0.xml', dir);
+        const dst = new URL('sitemap.xml', dir);
+        try {
+          await copyFile(src, dst);
+          logger.info('copied sitemap-0.xml → sitemap.xml');
+        } catch (err) {
+          logger.warn(
+            `skip copy sitemap.xml: ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+      },
+    },
+  };
+}
 
 /**
  * Deploy target được quyết bởi env var (set trong CI workflow):
@@ -38,6 +73,9 @@ export default defineConfig({
     sitemap({
       filter: (page) => !page.includes('/drafts/'),
     }),
+    // Phải đặt SAU `sitemap()` để hook `astro:build:done` chạy sau khi
+    // file `sitemap-index.xml` đã tồn tại trong `dist/`.
+    copySitemapAlias(),
   ],
 
   vite: {
